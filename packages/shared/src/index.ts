@@ -459,6 +459,69 @@ export interface TestRunInput {
   suiteId: string;
   connectionId: string;
   datasetId: string;
+  policyId?: string;
+}
+
+export interface ReleasePolicyInput {
+  name: string;
+  environment: TestEnvironment;
+  passThreshold: number;
+  minimumCoverage: number;
+  maxCriticalFailures: number;
+  allowErrors: boolean;
+  allowBlocked: boolean;
+}
+
+export interface ReleasePolicy extends ReleasePolicyInput {
+  id: string;
+  version: number;
+  createdAt: string;
+}
+
+export interface RunMetrics {
+  planned: number;
+  executed: number;
+  passed: number;
+  failed: number;
+  errors: number;
+  blocked: number;
+  cancelled: number;
+  running: number;
+  criticalNonPass: number;
+  passRate: number;
+  coverage: number;
+  elapsedMs: number;
+}
+
+export interface GateDecision {
+  runId: string;
+  decision: "PENDING" | "GO" | "NO-GO";
+  reasons: string[];
+  metrics: RunMetrics;
+  policy: ReleasePolicy | null;
+  evaluatedAt?: string;
+}
+
+export interface DefectOccurrence {
+  resultId: string;
+  runId: string;
+  recordId: string;
+  observedAt: string;
+  evidence: unknown;
+}
+
+export interface DefectCandidate {
+  id: string;
+  signature: string;
+  title: string;
+  severity: string;
+  environment: TestEnvironment;
+  caseId: string;
+  pbi?: string;
+  category: "assertion" | "response" | "infrastructure";
+  createdAt: string;
+  updatedAt: string;
+  occurrences: DefectOccurrence[];
 }
 
 export interface TestRunsResponse {

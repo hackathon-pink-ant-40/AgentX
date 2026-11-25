@@ -3,6 +3,7 @@ import type {
   ConnectionInput,
   DatasetListResponse,
   DatasetManifest,
+  ReleasePolicy,
   SystemConnection,
   TestResult,
   TestRun,
@@ -62,6 +63,8 @@ export default function PhaseThreePage({ initialTab = "configuration" }: { initi
   const [suiteId, setSuiteId] = useState("");
   const [connectionId, setConnectionId] = useState("");
   const [datasetId, setDatasetId] = useState("");
+  const [policies, setPolicies] = useState<ReleasePolicy[]>([]);
+  const [policyId, setPolicyId] = useState("");
   const [selectedSuiteId, setSelectedSuiteId] = useState("");
   const [suiteDocument, setSuiteDocument] = useState("");
   const [selectedRunId, setSelectedRunId] = useState("");
@@ -86,14 +89,16 @@ export default function PhaseThreePage({ initialTab = "configuration" }: { initi
   const [notice, setNotice] = useState("");
 
   const refreshWorkspace = useCallback(async () => {
-    const [connectionResponse, suiteResponse, datasetResponse, runResponse, localDefault] = await Promise.all([
+    const [connectionResponse, suiteResponse, datasetResponse, runResponse, localDefault, policyResponse] = await Promise.all([
       apiRequest<{ connections: SystemConnection[] }>("/api/connections"),
       apiRequest<{ suites: Array<{ id: string; name: string; latestVersion: number; caseCount: number }> }>("/api/test-suites"),
       apiRequest<DatasetListResponse>("/api/datasets"),
       apiRequest<{ runs: TestRun[] }>("/api/test-runs"),
       apiRequest<{ baseUrl: string }>("/api/connections/local-default"),
+      apiRequest<{ policies: ReleasePolicy[] }>("/api/release-policies"),
     ]);
     setConnections(connectionResponse.connections);
+    setPolicies(policyResponse.policies);
     setSuites(suiteResponse.suites);
     const readyDatasets = datasetResponse.datasets.filter((dataset) => dataset.status === "READY");
     setDatasets(readyDatasets);
@@ -109,6 +114,12 @@ export default function PhaseThreePage({ initialTab = "configuration" }: { initi
       setError(requestError instanceof Error ? requestError.message : "Unable to load test execution configuration.");
     });
   }, [refreshWorkspace]);
+
+  useEffect(() => {
+    if (policyId && !policies.some((policy) => policy.id === policyId && policy.environment === connections.find((connection) => connection.id === connectionId)?.environment)) {
+      setPolicyId("");
+    }
+  }, [policyId, policies, connections, connectionId]);
 
   const refreshSelectedRun = useCallback(async (runId: string) => {
     const [runResponse, resultResponse] = await Promise.all([
@@ -282,7 +293,7 @@ export default function PhaseThreePage({ initialTab = "configuration" }: { initi
 
   async function startRun(): Promise<void> {
     await perform(async () => {
-      const input: TestRunInput = { suiteId, connectionId, datasetId };
+      const input: TestRunInput = { suiteId, connectionId, datasetId, ...(policyId ? { policyId } : {}) };
       const response = await apiRequest<{ run: TestRun }>("/api/test-runs", {
         method: "POST",
         body: JSON.stringify(input),
@@ -394,6 +405,7 @@ export default function PhaseThreePage({ initialTab = "configuration" }: { initi
               <label>Connection<select value={connectionId} onChange={(event) => setConnectionId(event.target.value)}><option value="">Select connection…</option>{connections.map((connection) => <option key={connection.id} value={connection.id}>{connection.name}{connection.enabled ? "" : " (disabled)"}</option>)}</select></label>
               <label>Suite<select value={suiteId} onChange={(event) => setSuiteId(event.target.value)}><option value="">Select suite…</option>{suites.map((suite) => <option key={suite.id} value={suite.id}>{suite.name} · v{suite.latestVersion}</option>)}</select></label>
               <label>Ready dataset<select value={datasetId} onChange={(event) => setDatasetId(event.target.value)}><option value="">Select dataset…</option>{datasets.map((dataset) => <option key={dataset.id} value={dataset.id}>{dataset.name} · {dataset.counts.total} records</option>)}</select></label>
+              <label>Release policy<select value={policyId} onChange={(event) => setPolicyId(event.target.value)}><option value="">Default for connection environment</option>{policies.filter((policy) => policy.environment === connections.find((connection) => connection.id === connectionId)?.environment).map((policy) => <option key={policy.id} value={policy.id}>{policy.name} · v{policy.version}</option>)}</select></label>
               <button className="button button-primary" disabled={busy || !connectionId || !suiteId || !datasetId} onClick={() => void startRun()}>Start run <span>→</span></button>
             </div>
             {datasets.length === 0 && <div className="phase-three-callout">Generate a READY dataset in Synthetic data before starting a run.</div>}

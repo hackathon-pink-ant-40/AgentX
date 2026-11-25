@@ -101,8 +101,30 @@ Expected HTTP responses, response schemas, and assertions are all required for `
 | GET | `/api/test-runs/:id/results` | Read persisted case and step evidence |
 | GET | `/api/test-runs/:id/log` | Download the run's JSONL event log |
 
+## Dashboard, audit, and release decisions
+
+The **Dashboard** shows persisted logical test outcomes, a historical run selector, filters, status and entity/operation charts, and a pass-rate trend. **Audit explorer** searches stored synthetic records and test results, including per-step request/response evidence, assertions, source data, and links to dataset exports and the run log. Result filters apply to the selected run; synthetic-record searches use the dataset, entity, and search filters. Filtered metrics count matching persisted results; the release decision always evaluates the complete run.
+
+**Release policies** are versioned and scoped to an environment. A run captures the selected policy version, or the default for its connection environment. The default requires at least 80% pass rate and 100% coverage, with no errors, blocked tests, or critical non-passes. Pass rate is PASS/planned, and coverage is (PASS+FAIL+ERROR)/planned; comparisons use unrounded values. Empty, incomplete, cancelled, or critical non-passing runs cannot receive GO. The critical-failure maximum is configurable, but any critical non-PASS still blocks GO. Runs created before policy snapshots were introduced are conservatively evaluated NO-GO with a missing-policy reason.
+
+The local **simulate merge regression** toggle makes the mock merge stop reparenting addresses. It is off by default, persists across restart, affects the whole local mock service, and cannot be changed while any run is queued or running. Create a dataset with `orphan_fk`, load the demo configuration, and run it once with regression off and once with it on to see a real GO versus NO-GO. The setting is captured in each new run snapshot. Restore the toggle afterward.
+
+NO-GO runs create local defect candidates for FAIL and ERROR results, grouped by stable signature with individual redacted occurrences. BLOCKED results remain visible in metrics and audit rather than being treated as defects. Candidates currently remain unresolved; there is no external ticket creation or deployment. Recommendations are advisory only, and the app is a local single-user sandbox rather than an authenticated or RBAC-enabled service.
+
+| Method | Path | Behavior |
+| --- | --- | --- |
+| GET, POST | `/api/release-policies` | List latest policies or create a policy |
+| PUT | `/api/release-policies/:id` | Save a new immutable policy version |
+| GET | `/api/analytics/runs` | Paginate run history and filtered metrics |
+| GET | `/api/analytics/runs/:id` | Read metrics, chart groups, and the persisted gate decision |
+| GET | `/api/analytics/runs/:id/results` | Filter and paginate run results |
+| GET | `/api/analytics/results/:id` | Inspect source record, input, and step evidence |
+| GET | `/api/analytics/records` | Search and paginate synthetic records |
+| GET | `/api/defects`, `/api/defects/export` | List or export local defect candidates |
+| GET, POST | `/api/demo/regression` | Read or change the global local regression toggle |
+
 ## Scope and next phases
 
-The UI provides a live service overview, a working Mock MDM API console, the complete model/synthetic-data workflow, and sandbox-scoped test configuration and execution. Audit analytics, release gates, regression controls, and defect workflows remain tracked in [docs/implementation-plan.md](docs/implementation-plan.md).
+The UI provides a live service overview, a Mock MDM API console, model/synthetic-data workflows, sandbox-scoped execution, audit analytics, release gates, and local defect candidates. Stretch sprint automation remains tracked in [docs/implementation-plan.md](docs/implementation-plan.md).
 
 See [.github/copilot-instructions.md](.github/copilot-instructions.md) for repository conventions and [MASTER_PROMPT.md](MASTER_PROMPT.md) for the full build specification.

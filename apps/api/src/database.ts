@@ -288,5 +288,49 @@ function migrate(database: Database.Database): void {
         .run(4, new Date().toISOString());
     });
     applySuiteNameMigration();
+    currentVersion = { version: 4 };
+  }
+
+  if ((currentVersion.version ?? 0) < 5) {
+    const applyAnalyticsMigration = database.transaction(() => {
+      database.exec(`
+        CREATE TABLE release_policies (
+          id TEXT NOT NULL, version INTEGER NOT NULL, name TEXT NOT NULL,
+          environment TEXT NOT NULL, settings_json TEXT NOT NULL, created_at TEXT NOT NULL,
+          PRIMARY KEY (id, version)
+        );
+        CREATE TABLE gate_decisions (
+          run_id TEXT PRIMARY KEY REFERENCES test_runs(id),
+          policy_json TEXT, decision TEXT NOT NULL, reasons_json TEXT NOT NULL,
+          metrics_json TEXT NOT NULL, evaluated_at TEXT NOT NULL
+        );
+        CREATE TABLE defect_candidates (
+          id TEXT PRIMARY KEY, signature TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
+          severity TEXT NOT NULL, environment TEXT NOT NULL, case_key TEXT NOT NULL,
+          pbi TEXT, category TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE defect_occurrences (
+          id TEXT PRIMARY KEY, defect_id TEXT NOT NULL REFERENCES defect_candidates(id),
+          result_id TEXT NOT NULL UNIQUE REFERENCES test_results(id),
+          run_id TEXT NOT NULL REFERENCES test_runs(id), record_id TEXT NOT NULL,
+          evidence_json TEXT NOT NULL, observed_at TEXT NOT NULL
+        );
+        CREATE INDEX defect_occurrences_defect_idx ON defect_occurrences(defect_id, observed_at);
+        CREATE TABLE demo_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO demo_settings (key, value) VALUES ('regression', 'false');
+        ALTER TABLE test_runs ADD COLUMN policy_json TEXT;
+      `);
+      const insert = database.prepare(`
+        INSERT INTO release_policies (id, version, name, environment, settings_json, created_at)
+        VALUES (?, 1, ?, ?, ?, ?)
+      `);
+      const now = new Date().toISOString();
+      for (const environment of ["DEMO", "DEV", "QA", "UAT"]) {
+        insert.run(`default-${environment.toLowerCase()}`, `Default ${environment} policy`, environment,
+          JSON.stringify({ passThreshold: 80, minimumCoverage: 100, maxCriticalFailures: 0, allowErrors: false, allowBlocked: false }), now);
+      }
+      database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(5, now);
+    });
+    applyAnalyticsMigration();
   }
 }

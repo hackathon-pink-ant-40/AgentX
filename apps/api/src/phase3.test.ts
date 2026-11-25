@@ -205,9 +205,62 @@ describe("Phase 3 test configuration and execution", () => {
     expect(persistedLog.status).toBe(200);
   });
 
+  it("persists baseline GO and real regression NO-GO with deduplicated evidence", async () => {
+    const demo = await loadDemo();
+    const datasetId = await createDataset(true);
+    const run = async () => {
+      const created = await request(baseUrl).post("/api/test-runs").send({ ...demo, datasetId }).expect(202);
+      const id = created.body.run.id as string;
+      expect((await waitForTerminalRun(id)).status).toBe("COMPLETED");
+      return id;
+    };
+    const baselineId = await run();
+    const baseline = await request(baseUrl).get(`/api/analytics/runs/${baselineId}`).expect(200);
+    expect(baseline.body.gate.decision).toBe("GO");
+    expect(baseline.body.metrics).toMatchObject({ planned: 4, executed: 4, passed: 4, passRate: 100, coverage: 100 });
+    const filtered = await request(baseUrl).get(`/api/analytics/runs/${baselineId}?caseId=lifecycle`).expect(200);
+    expect(filtered.body.metrics).toMatchObject({ planned: 1, executed: 1, passed: 1 });
+    const policy = baseline.body.gate.policy;
+    await request(baseUrl).put(`/api/release-policies/${policy.id}`).send({
+      name: policy.name, environment: policy.environment, passThreshold: 100, minimumCoverage: 100,
+      maxCriticalFailures: 0, allowErrors: false, allowBlocked: false,
+    }).expect(200);
+    expect((await request(baseUrl).get(`/api/analytics/runs/${baselineId}`).expect(200)).body.gate.policy.version).toBe(1);
+    await request(baseUrl).post("/api/demo/regression").send({ enabled: true }).expect(200);
+    const regressionId = await run();
+    const nextRegressionId = await run();
+    const regression = await request(baseUrl).get(`/api/analytics/runs/${regressionId}`).expect(200);
+    expect(regression.body.gate).toMatchObject({ decision: "NO-GO", policy: { version: 2 } });
+    expect(regression.body.metrics.failed).toBeGreaterThan(0);
+    const evidence = await request(baseUrl).get(`/api/analytics/runs/${regressionId}/results?status=FAIL`).expect(200);
+    const failedResult = evidence.body.results[0];
+    expect(failedResult.steps.some((step: { assertions: Array<{ passed: boolean }> }) => step.assertions.some((assertion) => !assertion.passed))).toBe(true);
+    const detail = await request(baseUrl).get(`/api/analytics/results/${failedResult.id}`).expect(200);
+    expect(detail.body.source.record_id).toBe(failedResult.inputRecordId);
+    expect(detail.body.expectedStatuses).toBeDefined();
+    await request(baseUrl).get(`/api/datasets/${datasetId}/export/combined`).expect(200);
+    const records = await request(baseUrl).get(`/api/analytics/records?datasetId=${datasetId}&search=${encodeURIComponent(failedResult.inputRecordId)}`).expect(200);
+    expect(records.body.records.some((record: { recordId: string }) => record.recordId === failedResult.inputRecordId)).toBe(true);
+    const defects = await request(baseUrl).get("/api/defects").expect(200);
+    expect(defects.body.defects).toHaveLength(1);
+    expect(defects.body.defects[0].occurrences.map((item: { runId: string }) => item.runId).sort()).toEqual([regressionId, nextRegressionId].sort());
+    const exported = await request(baseUrl).get("/api/defects/export").expect(200);
+    expect(exported.body.defects[0].occurrences).toHaveLength(2);
+    database.prepare("DELETE FROM gate_decisions WHERE run_id = ?").run(regressionId);
+    new TestRunService(database, datasetService, { logDirectory: join(directory, "logs") }).recoverInterruptedRuns();
+    expect((await request(baseUrl).get("/api/defects").expect(200)).body.defects[0].occurrences).toHaveLength(2);
+    await startServer();
+    expect((await request(baseUrl).get(`/api/analytics/runs/${regressionId}`).expect(200)).body.gate.decision).toBe("NO-GO");
+    expect((await request(baseUrl).get("/api/demo/regression").expect(200)).body.enabled).toBe(true);
+    await request(baseUrl).post("/api/demo/regression").send({ enabled: false }).expect(200);
+    await loadDemo();
+    const restoredId = await run();
+    expect((await request(baseUrl).get(`/api/analytics/runs/${restoredId}`).expect(200)).body.gate.decision).toBe("GO");
+  });
+
   it("marks unexpected acceptance FAIL and blocks dependent cases", async () => {
     const acceptedFetch: typeof fetch = async () => new Response(
-      JSON.stringify({ accepted: false }),
+      JSON.stringify({ accepted: false, secretToken: "sensitive-assertion-value" }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
     await startServer(acceptedFetch);
@@ -250,7 +303,10 @@ describe("Phase 3 test configuration and execution", () => {
           method: "GET",
           path: "customers",
           expectedStatuses: [200],
-          assertions: [{ path: "accepted", operator: "equals", expected: true }],
+          assertions: [
+            { path: "accepted", operator: "equals", expected: true },
+            { path: "secretToken", operator: "equals", expected: "not-the-token" },
+          ],
         }],
       },
       {
@@ -285,6 +341,15 @@ describe("Phase 3 test configuration and execution", () => {
     const results = (await request(baseUrl).get(`/api/test-runs/${run.body.run.id}/results`).expect(200)).body.results;
     expect(results.map((result: { caseId: string; status: string }) => [result.caseId, result.status]).sort())
       .toEqual([["assertionMismatch", "FAIL"], ["rejectDuplicate", "FAIL"], ["requiresRejection", "BLOCKED"]]);
+    const gate = (await request(baseUrl).get(`/api/analytics/runs/${run.body.run.id}`).expect(200)).body.gate;
+    expect(gate.decision).toBe("NO-GO");
+    expect(gate.metrics).toMatchObject({ planned: 3, executed: 2, failed: 2, blocked: 1 });
+    expect(gate.reasons.some((reason: string) => reason.includes("blocked"))).toBe(true);
+    expect(JSON.stringify(results)).not.toContain("sensitive-assertion-value");
+    const defectExport = await request(baseUrl).get("/api/defects/export").expect(200);
+    expect(JSON.stringify(defectExport.body)).not.toContain("sensitive-assertion-value");
+    const log = await request(baseUrl).get(`/api/test-runs/${run.body.run.id}/log`).expect(200);
+    expect(log.text ?? log.body.toString("utf8")).not.toContain("sensitive-assertion-value");
   });
 
   it("records request timeouts as ERROR and supports cancellation", async () => {
@@ -322,7 +387,7 @@ describe("Phase 3 test configuration and execution", () => {
           path: "customers",
           expectedStatuses: [200],
           assertions: [],
-          timeoutMs: 100,
+          timeoutMs: 500,
         }],
       }],
     }).expect(201);
@@ -336,6 +401,9 @@ describe("Phase 3 test configuration and execution", () => {
     const timeoutResults = (await request(baseUrl).get(`/api/test-runs/${timeoutRun.body.run.id}/results`).expect(200)).body.results;
     expect(timeoutResults[0].status).toBe("ERROR");
     expect(timeoutResults[0].steps[0].error).toContain("timed out");
+    const timeoutGate = (await request(baseUrl).get(`/api/analytics/runs/${timeoutRun.body.run.id}`).expect(200)).body.gate;
+    expect(timeoutGate.decision).toBe("NO-GO");
+    expect(timeoutGate.reasons.some((reason: string) => reason.includes("errors are disallowed"))).toBe(true);
 
     const cancelRun = await request(baseUrl).post("/api/test-runs").send({
       suiteId: suite.body.suite.id,
@@ -343,6 +411,9 @@ describe("Phase 3 test configuration and execution", () => {
       datasetId,
     }).expect(202);
     const cancelId = cancelRun.body.run.id as string;
+    const pending = await request(baseUrl).get(`/api/analytics/runs/${cancelId}`).expect(200);
+    expect(pending.body.gate.decision).toBe("PENDING");
+    await request(baseUrl).post("/api/demo/regression").send({ enabled: true }).expect(409);
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
       const status = (await request(baseUrl).get(`/api/test-runs/${cancelId}`).expect(200)).body.run.status;
@@ -354,5 +425,41 @@ describe("Phase 3 test configuration and execution", () => {
     expect(cancelled.status).toBe("CANCELLED");
     const cancelledResults = (await request(baseUrl).get(`/api/test-runs/${cancelId}/results`).expect(200)).body.results;
     expect(cancelledResults[0].status).toBe("CANCELLED");
+    expect((await request(baseUrl).get(`/api/analytics/runs/${cancelId}`).expect(200)).body.gate.decision).toBe("NO-GO");
+  });
+
+  it("uses unrounded thresholds and rejects empty, incomplete and critical non-pass runs", async () => {
+    const demo = await loadDemo();
+    const datasetId = await createDataset(true);
+    const created = await request(baseUrl).post("/api/test-runs").send({ ...demo, datasetId }).expect(202);
+    const id = created.body.run.id as string;
+    await waitForTerminalRun(id);
+    const row = database.prepare("SELECT policy_json FROM test_runs WHERE id = ?").get(id) as { policy_json: string };
+    const policy = JSON.parse(row.policy_json) as Record<string, unknown>;
+    const evaluate = async () => (await request(baseUrl).get(`/api/analytics/runs/${id}`).expect(200)).body.gate;
+    const resetDecision = () => database.prepare("DELETE FROM gate_decisions WHERE run_id = ?").run(id);
+    database.prepare("UPDATE test_results SET status = 'BLOCKED', critical = 0 WHERE run_id = ? AND case_key = 'orphanAddress'").run(id);
+    database.prepare("UPDATE test_runs SET policy_json = ? WHERE id = ?").run(JSON.stringify({
+      ...policy, passThreshold: 75.001, minimumCoverage: 75, allowBlocked: true,
+    }), id);
+    resetDecision();
+    const justBelow = await evaluate();
+    expect(justBelow.metrics).toMatchObject({ passRate: 75, coverage: 75 });
+    expect(justBelow.decision).toBe("NO-GO");
+    database.prepare("UPDATE test_runs SET policy_json = ? WHERE id = ?").run(JSON.stringify({
+      ...policy, passThreshold: 75, minimumCoverage: 75, allowBlocked: true,
+    }), id);
+    resetDecision();
+    expect((await evaluate()).decision).toBe("GO");
+    database.prepare("UPDATE test_results SET critical = 1 WHERE run_id = ? AND case_key = 'orphanAddress'").run(id);
+    resetDecision();
+    expect((await evaluate()).decision).toBe("NO-GO");
+    database.prepare("UPDATE test_runs SET status = 'CANCELLED' WHERE id = ?").run(id);
+    resetDecision();
+    expect((await evaluate()).reasons.some((reason: string) => reason.includes("CANCELLED"))).toBe(true);
+    database.prepare("DELETE FROM test_results WHERE run_id = ?").run(id);
+    database.prepare("UPDATE test_runs SET status = 'COMPLETED', counters_json = ? WHERE id = ?").run(JSON.stringify({ planned: 0 }), id);
+    resetDecision();
+    expect((await evaluate()).reasons).toContain("No tests were planned.");
   });
 });

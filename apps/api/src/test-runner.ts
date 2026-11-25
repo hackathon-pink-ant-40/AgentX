@@ -29,6 +29,7 @@ import type {
   TestVerdict,
 } from "@agentx/shared";
 import { DatasetService } from "./dataset-service.js";
+import { finalizeGate, getPolicy } from "./analytics.js";
 import { HttpError } from "./http-error.js";
 import {
   buildRequestUrl,
@@ -93,6 +94,7 @@ interface RunSnapshot {
   suite: TestSuite;
   connection: SystemConnection;
   dataset: DatasetManifest;
+  regressionEnabled?: boolean;
 }
 
 interface RunPlanItem {
@@ -170,6 +172,7 @@ export class TestRunService {
     const connection = connectionFromRow(connectionRow);
     if (!connection.enabled) throw new HttpError(409, "CONNECTION_DISABLED", `Connection ${connection.name} is disabled.`);
     validateMockBaseUrl(connection.baseUrl, localPort);
+    const policy = getPolicy(this.database, input.policyId ?? `default-${connection.environment.toLowerCase()}`, connection.environment);
 
     const dataset = this.datasetService.getManifest(input.datasetId);
     if (dataset.status !== "READY") throw new HttpError(409, "DATASET_NOT_READY", "Only READY datasets can be executed.");
@@ -210,6 +213,7 @@ export class TestRunService {
       suite,
       connection,
       dataset,
+      regressionEnabled: (this.database.prepare("SELECT value FROM demo_settings WHERE key = 'regression'").get() as { value: string }).value === "true",
     };
     mkdirSync(this.logDirectory, { recursive: true });
     writeFileSync(this.logPath(runId), "", { encoding: "utf8", flag: "wx" });
@@ -217,8 +221,8 @@ export class TestRunService {
       this.database.prepare(`
         INSERT INTO test_runs (
           id, suite_id, suite_version_id, connection_id, dataset_id, status,
-          snapshot_json, counters_json, namespace, created_at
-        ) VALUES (?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?, ?)
+          snapshot_json, counters_json, namespace, created_at, policy_json
+        ) VALUES (?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?)
       `).run(
         runId,
         suite.id,
@@ -229,6 +233,7 @@ export class TestRunService {
         JSON.stringify(counters),
         namespace,
         createdAt,
+        JSON.stringify(policy),
       );
     });
     insert();
@@ -412,6 +417,11 @@ export class TestRunService {
         `).run(errorMessage(error), new Date().toISOString(), id);
       }
     }
+    const missingDecisions = this.database.prepare(`
+      SELECT id FROM test_runs WHERE status NOT IN ('QUEUED', 'RUNNING')
+        AND NOT EXISTS (SELECT 1 FROM gate_decisions WHERE run_id = test_runs.id)
+    `).all() as Array<{ id: string }>;
+    for (const { id } of missingDecisions) finalizeGate(this.database, id);
   }
 
   private enqueue(runId: string): void {
@@ -1012,12 +1022,17 @@ export class TestRunService {
       }
     }
     const completedAt = new Date().toISOString();
-    const update = this.database.prepare(`
-      UPDATE test_runs SET status = ?, error = COALESCE(?, error), completed_at = ?
-      WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
-    `).run(status, reason ?? null, completedAt, runId);
-    if (update.changes !== 1) return;
-    this.refreshCounters(runId);
+    const finalized = this.database.transaction(() => {
+      const update = this.database.prepare(`
+        UPDATE test_runs SET status = ?, error = COALESCE(?, error), completed_at = ?
+        WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
+      `).run(status, reason ?? null, completedAt, runId);
+      if (update.changes !== 1) return false;
+      this.refreshCounters(runId);
+      finalizeGate(this.database, runId);
+      return true;
+    })();
+    if (!finalized) return;
     try {
       this.appendLog(runId, {
         event: "run-finished",
@@ -1206,13 +1221,18 @@ function evaluateAssertions(
       path: assertion.path,
       operator: assertion.operator,
       passed,
-      ...(assertion.expected === undefined ? {} : { expected: redact(expected) }),
-      ...(actual.exists ? { actual: redact(actual.value) } : {}),
+      ...(assertion.expected === undefined ? {} : { expected: redactAssertionValue(assertion.path, expected) }),
+      ...(actual.exists ? { actual: redactAssertionValue(assertion.path, actual.value) } : {}),
       message: passed
         ? `${assertion.path} ${assertion.operator} assertion passed.`
         : `${assertion.path} ${assertion.operator} assertion failed.`,
     };
   });
+}
+
+function redactAssertionValue(path: string, value: unknown): unknown {
+  const result = redact({ [path]: value }) as Record<string, unknown>;
+  return result[path];
 }
 
 function extractValues(extract: Record<string, string> | undefined, responseBody: unknown): Record<string, unknown> {

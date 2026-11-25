@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { HealthResponse } from "@agentx/shared";
 import express, { type ErrorRequestHandler } from "express";
 import { DatasetService } from "./dataset-service.js";
+import { createAnalyticsRouter } from "./analytics-api.js";
 import { createExecutionApiRouter } from "./execution-api.js";
 import { createMockMdmRouter } from "./mock-mdm.js";
 import { createModelsApiRouter } from "./models-api.js";
@@ -35,6 +36,7 @@ export function createApp(
 
   app.use("/api/mock-api", createMockMdmRouter(database));
   app.use("/api", createModelsApiRouter(database, datasetService));
+  app.use("/api", createAnalyticsRouter(database, testRunService));
   app.use("/api", createExecutionApiRouter(database, datasetService, testRunService));
   app.use("/api", (_request, response) => {
     response.status(404).json({

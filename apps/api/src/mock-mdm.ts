@@ -241,7 +241,8 @@ export function createMockMdmRouter(database: Database.Database): Router {
 
     const now = new Date().toISOString();
     const merge = database.transaction(() => {
-      const reparentedAddressCount = database
+      const regression = database.prepare("SELECT value FROM demo_settings WHERE key = 'regression'").get() as { value: string };
+      const reparentedAddressCount = regression.value === "true" ? 0 : database
         .prepare("UPDATE addresses SET customer_id = ? WHERE customer_id = ?")
         .run(survivorId, mergedId).changes;
       database

@@ -32,10 +32,10 @@ This checklist tracks the phased build in `MASTER_PROMPT.md`. Mark an item compl
 
 ## Phase 4 — Analytics and release gates
 
-- [ ] Calculate dashboard and audit metrics from persisted results; add filters and evidence drill-down.
-- [ ] Implement versioned release policies and conservative GO/NO-GO decisions from actual final run outcomes.
-- [ ] Add the regression toggle, demonstrate actual failed assertions and NO-GO, and persist local defect candidates.
-- [ ] Add defect export and focused metrics, policy, regression, audit, and restart-persistence tests.
+- [x] Calculate dashboard and audit metrics from persisted results; add filters and evidence drill-down.
+- [x] Implement versioned release policies and conservative GO/NO-GO decisions from actual final run outcomes.
+- [x] Add the regression toggle, demonstrate actual failed assertions and NO-GO, and persist local defect candidates.
+- [x] Add defect export and focused metrics, policy, regression, audit, and restart-persistence tests.
 
 ## Phase 5 — Stretch (only after Phase 4 is green)
 
@@ -73,6 +73,13 @@ This checklist tracks the phased build in `MASTER_PROMPT.md`. Mark an item compl
 - [x] Run snapshots, results, step evidence, counters, and redacted JSONL logs persist across API restart.
 - [x] Isolated live smoke passed on API/UI ports 3101/5174: UI HTTP 200, API health `ok`, 3 generated records, 4/4 cases `PASS`, and the run JSONL download returned HTTP 200 with 18 events.
 
-## Deferred beyond Phase 3
+## Phase 4 acceptance checks
 
-Analytics, audit dashboards, release gates, regression controls, defect workflows, and sprint automation remain unimplemented and are tracked above rather than represented as functional-looking placeholder screens.
+- [x] Persisted-result metrics, filters, policy snapshots, and threshold edge cases are covered by integration tests.
+- [x] Baseline and real merge-regression runs produce GO and NO-GO respectively; repeated regression failures deduplicate with separate occurrences.
+- [x] Defect JSON export, evidence drill-down, pending/cancelled/error/blocked outcomes, and decision recovery are exercised.
+- [x] Isolated API/UI smoke: baseline 4/4 PASS and GO; regression 2 PASS, 1 FAIL, 1 BLOCKED and NO-GO, with one local defect candidate. Browser validation covered run selection, charts, regression control, and mobile audit drill-down.
+
+## Deferred beyond Phase 4
+
+Sprint automation remains a stretch item. Local defect candidates remain unresolved and no external ticket or deployment integration is enabled.

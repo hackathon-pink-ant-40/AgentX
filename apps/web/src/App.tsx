@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import PhaseTwoPage from "./PhaseTwoPage";
 import PhaseThreePage from "./PhaseThreePage";
+import PhaseFourPage from "./PhaseFourPage";
 import type {
   Address,
   AddressResponse,
@@ -17,7 +18,7 @@ import type {
   PatchCustomerRequest,
 } from "@agentx/shared";
 
-type Page = "overview" | "mock-api" | "models" | "synthetic-data" | "test-configuration" | "test-execution";
+type Page = "overview" | "mock-api" | "models" | "synthetic-data" | "test-configuration" | "test-execution" | "dashboard" | "audit" | "policies";
 
 const apiBase = "/api/mock-api";
 
@@ -240,6 +241,9 @@ function App() {
           <button className={`nav-item ${page === "test-execution" ? "active" : ""}`} onClick={() => setPage("test-execution")}>
             <span className="nav-icon">▷</span> Test execution
           </button>
+          <button className={`nav-item ${page === "dashboard" ? "active" : ""}`} onClick={() => setPage("dashboard")}><span className="nav-icon">◫</span> Dashboard</button>
+          <button className={`nav-item ${page === "audit" ? "active" : ""}`} onClick={() => setPage("audit")}><span className="nav-icon">⌕</span> Audit explorer</button>
+          <button className={`nav-item ${page === "policies" ? "active" : ""}`} onClick={() => setPage("policies")}><span className="nav-icon">✓</span> Release policies</button>
         </nav>
         <div className="sidebar-bottom">
           <span className="sandbox-dot" /> LOCAL SANDBOX
@@ -249,7 +253,7 @@ function App() {
 
       <main className="main-content">
         <header className="topbar">
-          <div className="breadcrumbs">TestAgent AI <span>/</span> {page === "overview" ? "Overview" : page === "mock-api" ? "Mock MDM API" : page === "models" ? "Data models" : page === "synthetic-data" ? "Synthetic data" : page === "test-configuration" ? "Test configuration" : "Test execution"}</div>
+          <div className="breadcrumbs">TestAgent AI <span>/</span> {page === "overview" ? "Overview" : page === "mock-api" ? "Mock MDM API" : page === "models" ? "Data models" : page === "synthetic-data" ? "Synthetic data" : page === "test-configuration" ? "Test configuration" : page === "test-execution" ? "Test execution" : page === "dashboard" ? "Dashboard" : page === "audit" ? "Audit explorer" : "Release policies"}</div>
           <div className="topbar-right">
             <span className="demo-badge"><span /> DEMO / SANDBOX</span>
             <span className="avatar">B</span>
@@ -276,6 +280,8 @@ function App() {
             />
           ) : page === "models" || page === "synthetic-data" ? (
             <PhaseTwoPage key={page} initialTab={page === "synthetic-data" ? "data" : "models"} />
+          ) : page === "dashboard" || page === "audit" || page === "policies" ? (
+            <PhaseFourPage key={page} initialTab={page} />
           ) : (
             <PhaseThreePage key={page} initialTab={page === "test-execution" ? "execution" : "configuration"} />
           )}

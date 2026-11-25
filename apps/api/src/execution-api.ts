@@ -288,6 +288,7 @@ export function createExecutionApiRouter(
       suiteId: String(body.suiteId ?? ""),
       connectionId: String(body.connectionId ?? ""),
       datasetId: String(body.datasetId ?? ""),
+      ...(body.policyId === undefined ? {} : { policyId: String(body.policyId) }),
     };
     response.status(202).json({ run: runService.create(runInput, localPort(request)) });
   }));
