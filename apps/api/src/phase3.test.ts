@@ -1,8 +1,9 @@
 import type Database from "better-sqlite3";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { Server } from "node:http";
-import { join } from "node:path";
+import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import request from "supertest";
 import type { TestCaseDefinition, TestRun } from "@agentx/shared";
@@ -10,6 +11,8 @@ import { createApp } from "./app.js";
 import { openDatabase } from "./database.js";
 import { DatasetService } from "./dataset-service.js";
 import { TestRunService } from "./test-runner.js";
+import { recoverSprintEvents } from "./sprint-close.js";
+import { demoSuiteName, demoTestCases } from "./demo-tests.js";
 
 const sampleModel = readFileSync(new URL("../../../samples/customer-address.canonical.json", import.meta.url), "utf8");
 
@@ -20,8 +23,9 @@ describe("Phase 3 test configuration and execution", () => {
   let server: Server | undefined;
   let baseUrl: string;
   let originalTestToken: string | undefined;
+  let originalLogDir: string | undefined;
 
-  async function startServer(fetchImpl: typeof fetch = fetch): Promise<void> {
+  async function startServer(fetchImpl: typeof fetch = fetch, useEnvironmentLogDir = false): Promise<void> {
     if (server) {
       const previousServer = server;
       server = undefined;
@@ -30,7 +34,7 @@ describe("Phase 3 test configuration and execution", () => {
       });
     }
     const runService = new TestRunService(database, datasetService, {
-      logDirectory: join(directory, "logs"),
+      ...(useEnvironmentLogDir ? {} : { logDirectory: join(directory, ".agentx-test", "logs") }),
       fetchImpl,
     });
     const app = createApp(database, datasetService, runService);
@@ -82,9 +86,10 @@ describe("Phase 3 test configuration and execution", () => {
   }
 
   beforeEach(async () => {
+    originalLogDir = process.env.AGENTX_LOG_DIR;
     directory = mkdtempSync(join(tmpdir(), "agentx-phase3-"));
     database = openDatabase(join(directory, "test.sqlite"));
-    datasetService = new DatasetService(database, join(directory, "exports"));
+    datasetService = new DatasetService(database, join(directory, ".agentx-test", "exports"));
     await startServer();
   });
 
@@ -101,6 +106,9 @@ describe("Phase 3 test configuration and execution", () => {
     if (originalTestToken === undefined) delete process.env.AGENTX_PHASE3_TEST_TOKEN;
     else process.env.AGENTX_PHASE3_TEST_TOKEN = originalTestToken;
     originalTestToken = undefined;
+    if (originalLogDir === undefined) delete process.env.AGENTX_LOG_DIR;
+    else process.env.AGENTX_LOG_DIR = originalLogDir;
+    originalLogDir = undefined;
   });
 
   it("restricts targets to this server and versions suite edits", async () => {
@@ -134,6 +142,88 @@ describe("Phase 3 test configuration and execution", () => {
       .get(`/api/test-suites/${demo.suiteId}/versions/${original.body.suite.version}`).expect(200);
     expect(firstVersion.body.suite.name).toBe(original.body.suite.name);
     expect(firstVersion.body.suite.cases).toEqual(original.body.suite.cases);
+  });
+
+  it("resolves relative log paths from the repository root", async () => {
+    const root = fileURLToPath(new URL("../../../", import.meta.url));
+    const logDirectory = join(directory, ".agentx-test", "relative-logs");
+    process.env.AGENTX_LOG_DIR = relative(root, logDirectory);
+    await startServer(fetch, true);
+    const demo = await loadDemo();
+    const datasetId = await createDataset(true);
+    const created = await request(baseUrl).post("/api/test-runs").send({ ...demo, datasetId }).expect(202);
+    await waitForTerminalRun(created.body.run.id);
+    expect(existsSync(join(logDirectory, `${created.body.run.id}.jsonl`))).toBe(true);
+    await request(baseUrl).get(`/api/test-runs/${created.body.run.id}/log`).expect(200);
+  });
+
+  it("does not overwrite unrelated configurations with demo names", async () => {
+    const connection = await request(baseUrl).post("/api/connections").send({
+      name: "Local Customer MDM Sandbox", systemType: "Other local setup", environment: "DEMO",
+      baseUrl: `${baseUrl}/api/mock-api`, authType: "none", headers: {}, timeoutMs: 1200, maxConcurrency: 1, enabled: true,
+    }).expect(201);
+    const suite = await request(baseUrl).post("/api/test-suites").send({
+      name: demoSuiteName, cases: [{ ...demoTestCases[0], name: "User-owned case" }],
+    }).expect(201);
+    const demo = (await request(baseUrl).post("/api/demo/load").send({}).expect(200)).body;
+    expect(demo.connection.id).not.toBe(connection.body.connection.id);
+    expect(demo.suite.id).not.toBe(suite.body.suite.id);
+    expect((await request(baseUrl).get(`/api/connections/${connection.body.connection.id}`).expect(200)).body.connection.systemType).toBe("Other local setup");
+    expect((await request(baseUrl).get(`/api/test-suites/${suite.body.suite.id}`).expect(200)).body.suite.cases[0].name).toBe("User-owned case");
+    const reloaded = (await request(baseUrl).post("/api/demo/load").send({}).expect(200)).body;
+    expect(reloaded.connection.updatedAt).toBe(demo.connection.updatedAt);
+    expect(reloaded.suite.versionId).toBe(demo.suite.versionId);
+  });
+
+  it("loads the full demo idempotently and orchestrates sprint close without duplicate runs", async () => {
+    const first = (await request(baseUrl).post("/api/demo/load").send({}).expect(200)).body;
+    const again = (await request(baseUrl).post("/api/demo/load").send({}).expect(200)).body;
+    expect(again.model.id).toBe(first.model.id);
+    expect(again.profile.id).toBe(first.profile.id);
+    expect(again.connection.id).toBe(first.connection.id);
+    expect(again.suite.versionId).toBe(first.suite.versionId);
+    expect(again.policy.id).toBe("default-demo");
+    expect(again.profile.negativeScenarios).toContain("orphan_fk");
+    expect((await request(baseUrl).get("/api/models").expect(200)).body.models).toHaveLength(1);
+    expect((await request(baseUrl).get("/api/generation-profiles").expect(200)).body.profiles).toHaveLength(1);
+    await request(baseUrl).patch(`/api/generation-profiles/${first.profile.id}`)
+      .send({ recordCounts: { Customer: 1, Address: 1 } }).expect(200);
+    expect((await request(baseUrl).post("/api/demo/load").send({}).expect(200)).body.profile.recordCounts.Customer).toBe(1);
+    const input = {
+      eventId: "sprint-event-one", sprintId: "sprint-1", profileId: first.profile.id, suiteId: first.suite.id,
+      connectionId: first.connection.id, policyId: first.policy.id,
+      workItems: ["PBI-DEMO-MDM-LIFECYCLE", "PBI-DEMO-MDM-NEGATIVE"],
+    };
+    const gap = await request(baseUrl).post("/api/sprint-events").send({ ...input, eventId: "missing-mapping", workItems: ["PBI-UNMAPPED"] }).expect(201);
+    expect(gap.body.event).toMatchObject({ status: "MAPPING_GAPS", decision: "NO-GO", gaps: ["PBI-UNMAPPED"] });
+    expect(gap.body.event.runId).toBeUndefined();
+    const started = await request(baseUrl).post("/api/sprint-events").send(input).expect(202);
+    const event = started.body.event;
+    const repeated = await request(baseUrl).post("/api/sprint-events").send({ ...input, workItems: [...input.workItems].reverse() }).expect(200);
+    expect(repeated.body.event.runId).toBe(event.runId);
+    expect(repeated.body.event.datasetId).toBe(event.datasetId);
+    await request(baseUrl).post("/api/sprint-events").send({ ...input, sprintId: "different" }).expect(409);
+    await waitForTerminalRun(event.runId);
+    const baseline = (await request(baseUrl).get(`/api/sprint-events/${input.eventId}`).expect(200)).body.event;
+    expect(baseline).toMatchObject({ status: "COMPLETED", decision: "GO", gate: { decision: "GO" } });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM sprint_events WHERE run_id IS NOT NULL").get()).toEqual({ count: 1 });
+    await request(baseUrl).post("/api/demo/regression").send({ enabled: true }).expect(200);
+    const bad = await request(baseUrl).post("/api/sprint-events").send({ ...input, eventId: "sprint-event-regression" }).expect(202);
+    await waitForTerminalRun(bad.body.event.runId);
+    const regression = (await request(baseUrl).get("/api/sprint-events/sprint-event-regression").expect(200)).body.event;
+    expect(regression).toMatchObject({ status: "COMPLETED", decision: "NO-GO", gate: { decision: "NO-GO" } });
+    expect((await request(baseUrl).get("/api/defects").expect(200)).body.defects.length).toBeGreaterThan(0);
+    const interruptedInput = { ...input, eventId: "interrupted" };
+    database.prepare("INSERT INTO sprint_events (id, input_json, status, gaps_json, created_at) VALUES (?, ?, 'CREATING', '[]', ?)")
+      .run(interruptedInput.eventId, JSON.stringify(interruptedInput), new Date().toISOString());
+    recoverSprintEvents(database);
+    expect((await request(baseUrl).get("/api/sprint-events/interrupted").expect(200)).body.event.status).toBe("ERROR");
+    await startServer();
+    expect((await request(baseUrl).get(`/api/sprint-events/${input.eventId}`).expect(200)).body.event.decision).toBe("GO");
+    expect((await request(baseUrl).get("/api/sprint-events/sprint-event-regression").expect(200)).body.event.decision).toBe("NO-GO");
+    await request(baseUrl).post("/api/demo/reset").send({}).expect(200);
+    expect((await request(baseUrl).get("/api/health").expect(200)).body.counts).toEqual({ customers: 0, addresses: 0 });
+    expect((await request(baseUrl).get(`/api/sprint-events/${input.eventId}`).expect(200)).body.event.decision).toBe("GO");
   });
 
   it("executes real lifecycle and rejection requests, persists results, and writes JSONL evidence", async () => {
@@ -175,7 +265,7 @@ describe("Phase 3 test configuration and execution", () => {
       id: string;
       caseId: string;
       status: string;
-      steps: Array<{ responseStatus?: number; assertions: Array<{ passed: boolean }> }>;
+      steps: Array<{ responseStatus?: number; responseBody?: { customer?: { firstName?: string } }; assertions: Array<{ passed: boolean }> }>;
     }>;
     expect(results.map((result) => [result.caseId, result.status]).sort((left, right) => left[0].localeCompare(right[0]))).toEqual([
       ["duplicateCustomer", "PASS"],
@@ -185,6 +275,7 @@ describe("Phase 3 test configuration and execution", () => {
     ]);
     const lifecycle = results.find((result) => result.caseId === "lifecycle");
     expect(lifecycle?.steps.map((step) => step.responseStatus)).toEqual([201, 200, 200, 201, 201, 200, 200, 200]);
+    expect(lifecycle?.steps[2].responseBody?.customer?.firstName).toContain("Zoë-東京");
     expect(lifecycle?.steps.every((step) => step.assertions.every((assertion) => assertion.passed))).toBe(true);
     const detail = await request(baseUrl).get(`/api/results/${results[0].id}`).expect(200);
     expect(detail.body.result.steps).toHaveLength(8);
@@ -247,7 +338,7 @@ describe("Phase 3 test configuration and execution", () => {
     const exported = await request(baseUrl).get("/api/defects/export").expect(200);
     expect(exported.body.defects[0].occurrences).toHaveLength(2);
     database.prepare("DELETE FROM gate_decisions WHERE run_id = ?").run(regressionId);
-    new TestRunService(database, datasetService, { logDirectory: join(directory, "logs") }).recoverInterruptedRuns();
+    new TestRunService(database, datasetService, { logDirectory: join(directory, ".agentx-test", "logs") }).recoverInterruptedRuns();
     expect((await request(baseUrl).get("/api/defects").expect(200)).body.defects[0].occurrences).toHaveLength(2);
     await startServer();
     expect((await request(baseUrl).get(`/api/analytics/runs/${regressionId}`).expect(200)).body.gate.decision).toBe("NO-GO");
@@ -414,6 +505,7 @@ describe("Phase 3 test configuration and execution", () => {
     const pending = await request(baseUrl).get(`/api/analytics/runs/${cancelId}`).expect(200);
     expect(pending.body.gate.decision).toBe("PENDING");
     await request(baseUrl).post("/api/demo/regression").send({ enabled: true }).expect(409);
+    await request(baseUrl).post("/api/demo/reset").send({}).expect(409);
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
       const status = (await request(baseUrl).get(`/api/test-runs/${cancelId}`).expect(200)).body.run.status;

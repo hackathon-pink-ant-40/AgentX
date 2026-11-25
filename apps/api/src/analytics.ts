@@ -213,6 +213,8 @@ export function finalizeGate(database: Database.Database, runId: string): GateDe
     database.prepare("INSERT INTO gate_decisions (run_id, policy_json, decision, reasons_json, metrics_json, evaluated_at) VALUES (?, ?, ?, ?, ?, ?)")
       .run(runId, run.policy_json, decision, JSON.stringify(reasons), JSON.stringify(metrics), evaluatedAt);
     if (decision === "NO-GO") localWorkItems.recordFailures(database, run);
+    database.prepare("UPDATE sprint_events SET status = 'COMPLETED', decision = ?, completed_at = ? WHERE run_id = ? AND status = 'RUNNING'")
+      .run(decision, evaluatedAt, runId);
   })();
   return { runId, decision, reasons, metrics, policy, evaluatedAt };
 }

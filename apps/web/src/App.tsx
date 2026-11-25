@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import PhaseTwoPage from "./PhaseTwoPage";
 import PhaseThreePage from "./PhaseThreePage";
 import PhaseFourPage from "./PhaseFourPage";
+import logo from "../../../logo/rabo_bank_logo.png";
 import type {
   Address,
   AddressResponse,
@@ -217,9 +218,9 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <a className="brand" href="#" onClick={() => setPage("overview")} aria-label="TestAgent AI overview">
-          <span className="brand-mark">T</span>
-          <span><strong>TestAgent</strong><small>AI WORKBENCH</small></span>
+        <a className="brand" href="#" onClick={() => setPage("overview")} aria-label="AgentX overview">
+          <img className="brand-mark" src={logo} alt="" />
+          <span><strong>AgentX</strong><small>AI WORKBENCH</small></span>
         </a>
         <div className="sidebar-label">WORKSPACE</div>
         <nav aria-label="Main navigation">
@@ -253,7 +254,7 @@ function App() {
 
       <main className="main-content">
         <header className="topbar">
-          <div className="breadcrumbs">TestAgent AI <span>/</span> {page === "overview" ? "Overview" : page === "mock-api" ? "Mock MDM API" : page === "models" ? "Data models" : page === "synthetic-data" ? "Synthetic data" : page === "test-configuration" ? "Test configuration" : page === "test-execution" ? "Test execution" : page === "dashboard" ? "Dashboard" : page === "audit" ? "Audit explorer" : "Release policies"}</div>
+          <div className="breadcrumbs">AgentX <span>/</span> {page === "overview" ? "Overview" : page === "mock-api" ? "Mock MDM API" : page === "models" ? "Data models" : page === "synthetic-data" ? "Synthetic data" : page === "test-configuration" ? "Test configuration" : page === "test-execution" ? "Test execution" : page === "dashboard" ? "Dashboard" : page === "audit" ? "Audit explorer" : "Release policies"}</div>
           <div className="topbar-right">
             <span className="demo-badge"><span /> DEMO / SANDBOX</span>
             <span className="avatar">B</span>
@@ -364,7 +365,7 @@ function Overview({
           <span className="service-status"><i /> Operational</span><button className="text-button" onClick={onOpenTests}>Open tests <b>→</b></button>
         </div>
       </section>
-      <footer className="page-footer"><span>TestAgent AI <span className="footer-dot">·</span> Local development build</span><span>Phase 3 of 5</span></footer>
+      <footer className="page-footer"><span>AgentX <span className="footer-dot">·</span> Local development build</span><span>Phase 3 of 5</span></footer>
     </>
   );
 }

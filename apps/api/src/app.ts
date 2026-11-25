@@ -6,6 +6,7 @@ import { createAnalyticsRouter } from "./analytics-api.js";
 import { createExecutionApiRouter } from "./execution-api.js";
 import { createMockMdmRouter } from "./mock-mdm.js";
 import { createModelsApiRouter } from "./models-api.js";
+import { createSprintRouter } from "./sprint-close.js";
 import { TestRunService } from "./test-runner.js";
 
 export function createApp(
@@ -37,6 +38,7 @@ export function createApp(
   app.use("/api/mock-api", createMockMdmRouter(database));
   app.use("/api", createModelsApiRouter(database, datasetService));
   app.use("/api", createAnalyticsRouter(database, testRunService));
+  app.use("/api", createSprintRouter(database, datasetService, testRunService));
   app.use("/api", createExecutionApiRouter(database, datasetService, testRunService));
   app.use("/api", (_request, response) => {
     response.status(404).json({

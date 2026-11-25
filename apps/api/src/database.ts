@@ -332,5 +332,23 @@ function migrate(database: Database.Database): void {
       database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(5, now);
     });
     applyAnalyticsMigration();
+    currentVersion = { version: 5 };
+  }
+
+  if ((currentVersion.version ?? 0) < 6) {
+    const applySprintMigration = database.transaction(() => {
+      database.exec(`
+        CREATE TABLE sprint_events (
+          id TEXT PRIMARY KEY, input_json TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('CREATING', 'RUNNING', 'COMPLETED', 'MAPPING_GAPS', 'ERROR')),
+          gaps_json TEXT NOT NULL, dataset_id TEXT REFERENCES datasets(id),
+          run_id TEXT UNIQUE REFERENCES test_runs(id), decision TEXT,
+          error TEXT, created_at TEXT NOT NULL, completed_at TEXT
+        );
+        CREATE INDEX sprint_events_run_idx ON sprint_events(run_id);
+      `);
+      database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(6, new Date().toISOString());
+    });
+    applySprintMigration();
   }
 }

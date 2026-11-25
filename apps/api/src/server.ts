@@ -3,6 +3,7 @@ import { openDatabase } from "./database.js";
 import { DatasetService } from "./dataset-service.js";
 import { loadLocalEnvironment } from "./env.js";
 import { TestRunService } from "./test-runner.js";
+import { recoverSprintEvents } from "./sprint-close.js";
 
 loadLocalEnvironment();
 const port = Number(process.env.PORT ?? 3001);
@@ -15,8 +16,9 @@ const datasetService = new DatasetService(database);
 datasetService.recoverIncompleteExports();
 const testRunService = new TestRunService(database, datasetService);
 testRunService.recoverInterruptedRuns();
+recoverSprintEvents(database);
 const server = createApp(database, datasetService, testRunService).listen(port, "127.0.0.1", () => {
-  console.log(`TestAgent AI API listening at http://127.0.0.1:${port}`);
+  console.log(`AgentX API listening at http://127.0.0.1:${port}`);
 });
 
 function shutdown(): void {

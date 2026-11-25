@@ -1,4 +1,4 @@
-# TestAgent AI implementation checklist
+# AgentX implementation checklist
 
 This checklist tracks the phased build in `MASTER_PROMPT.md`. Mark an item complete only after its behavior is implemented and the relevant check has been run. The application is a local, single-user sandbox; no real customer data, production targets, external AI credentials, or external ticket integrations are used.
 
@@ -39,7 +39,7 @@ This checklist tracks the phased build in `MASTER_PROMPT.md`. Mark an item compl
 
 ## Phase 5 — Stretch (only after Phase 4 is green)
 
-- [ ] Add a provider-neutral, idempotent local sprint-close event workflow with surfaced test-mapping gaps.
+- [x] Add an idempotent local sprint-close event workflow with a replaceable mapping provider and surfaced test-mapping gaps.
 - [ ] Consider OpenAPI import, optional inference adapters, and CI/work-item interfaces without enabling external actions by default.
 
 ## Phase 1 acceptance checks
@@ -80,6 +80,15 @@ This checklist tracks the phased build in `MASTER_PROMPT.md`. Mark an item compl
 - [x] Defect JSON export, evidence drill-down, pending/cancelled/error/blocked outcomes, and decision recovery are exercised.
 - [x] Isolated API/UI smoke: baseline 4/4 PASS and GO; regression 2 PASS, 1 FAIL, 1 BLOCKED and NO-GO, with one local defect candidate. Browser validation covered run selection, charts, regression control, and mobile audit drill-down.
 
-## Deferred beyond Phase 4
+## End-to-end QA and sprint-close checks
 
-Sprint automation remains a stretch item. Local defect candidates remain unresolved and no external ticket or deployment integration is enabled.
+- [x] Upload a Customer/Address model; preview and generate 20 Customers and 30 Addresses with one intentional orphan, valid remaining relationships, and deterministic payload reproduction.
+- [x] Exercise browser baseline and sprint-close runs: 61 PASS and GO; exercise the real merge regression: 21 PASS, 20 FAIL, 20 BLOCKED and NO-GO.
+- [x] Check chart filtering, expected/actual rejection evidence, dataset and JSONL downloads, and persisted step/log counts (201 baseline, 141 regression).
+- [x] Verify missing work-item mappings produce NO-GO without a run, and GO/NO-GO sprint decisions survive API restart.
+- [x] Make demo loading idempotent and guard mock reset against active runs. Cover these and sprint event idempotency, conflicts, mapping gaps and recovery with integration tests.
+- [x] Final `npm.cmd run build` and `npm.cmd test` passed (17 tests across 3 files); `git diff --check` passed.
+
+## Deferred
+
+Local defect candidates remain unresolved. No external work-item, ticket, deployment, authentication, RBAC, OpenAPI import, or runtime LLM integration is enabled; Mermaid diagrams and rule/suite editors are not graphical.

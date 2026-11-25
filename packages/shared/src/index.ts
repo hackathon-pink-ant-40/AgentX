@@ -89,7 +89,7 @@ export interface AddressListResponse {
 }
 
 export type ModelFieldType = "string" | "integer" | "number" | "boolean" | "date" | "datetime";
-export type ModelSourceFormat = "canonical" | "json-schema" | "mermaid";
+export type ModelSourceFormat = "canonical" | "json-schema" | "mermaid" | "smart-mdm";
 export type LocaleCode = "en" | "nl" | "de";
 export type PrimitiveValue = string | number | boolean | null;
 export type GenerationRuleKind =
@@ -500,6 +500,29 @@ export interface GateDecision {
   metrics: RunMetrics;
   policy: ReleasePolicy | null;
   evaluatedAt?: string;
+}
+
+export interface SprintCloseInput {
+  eventId: string;
+  sprintId: string;
+  workItems: string[];
+  profileId: string;
+  suiteId: string;
+  connectionId: string;
+  policyId: string;
+}
+
+export interface SprintCloseEvent {
+  input: SprintCloseInput;
+  status: "CREATING" | "RUNNING" | "COMPLETED" | "MAPPING_GAPS" | "ERROR";
+  gaps: string[];
+  datasetId?: string;
+  runId?: string;
+  decision?: "GO" | "NO-GO";
+  gate?: GateDecision;
+  error?: string;
+  createdAt: string;
+  completedAt?: string;
 }
 
 export interface DefectOccurrence {

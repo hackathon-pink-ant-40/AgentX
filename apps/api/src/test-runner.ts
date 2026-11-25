@@ -6,7 +6,8 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
 import { Ajv, type AnySchema } from "ajv";
 import type {
@@ -124,12 +125,13 @@ const maxPlannedTests = 2_000;
 const maxResponseBytes = 64 * 1024;
 const maxRequestBytes = 64 * 1024;
 const maxRunNamespaceLength = 100;
-const defaultLogDirectory = resolve(process.cwd(), "storage/logs");
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const defaultLogDirectory = resolve(projectRoot, "storage/logs");
 
 function resolveLogDirectory(): string {
   const configured = process.env.AGENTX_LOG_DIR;
   if (!configured) return defaultLogDirectory;
-  return isAbsolute(configured) ? configured : resolve(process.cwd(), configured);
+  return isAbsolute(configured) ? configured : resolve(projectRoot, configured);
 }
 
 export class TestRunService {

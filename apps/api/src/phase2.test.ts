@@ -65,6 +65,53 @@ describe("model-driven synthetic data API", () => {
       .toHaveLength(2);
   });
 
+  it("imports Smart MDM fields as separate entities without inventing relationships", async () => {
+    const schema = {
+      format: "smart-mdm/schema", formatVersion: 1, domain: "party", domainLabel: "Party Master",
+      schema: {
+        fields: [
+          { key: "party_id", type: "text", required: true },
+          { key: "status", type: "dropdown", required: false, options: ["active", "retired"] },
+          { key: "birth_date", type: "date", required: false, pii: "sensitive", qualityRules: { weight: 0 } },
+          { key: "country", type: "dropdown", required: false },
+          { key: "postal_code", type: "text", required: false },
+        ],
+        children: [{
+          key: "identifiers", label: "Identifiers", matchKey: "value", maxOccurrences: 5, absence: "snapshot",
+          fields: [
+            { key: "value", type: "text", required: true, qualityRules: { unique: true } },
+            { key: "verified", type: "boolean", required: false },
+            { key: "postal_code", type: "text", required: false },
+          ],
+        }],
+        roles: { Viewer: { canEdit: false } },
+      },
+    };
+    const content = JSON.stringify(schema);
+    const wrongFormat = await request(app).post("/api/models/import").send({ sourceFormat: "json-schema", content }).expect(400);
+    expect(wrongFormat.body.error.code).toBe("WRONG_MODEL_FORMAT");
+    const imported = await request(app).post("/api/models/import").send({ sourceFormat: "smart-mdm", content }).expect(201);
+    const model = imported.body.model.model;
+    expect(imported.body.model.sourceFormat).toBe("smart-mdm");
+    expect(model.entities.map((entity: { name: string }) => entity.name)).toEqual(["party", "identifiers"]);
+    expect(model.entities[0].fields.find((field: { name: string }) => field.name === "status").enum).toEqual(["active", "retired"]);
+    expect(model.entities[0].fields.find((field: { name: string }) => field.name === "country").enum).toBeUndefined();
+    expect(model.entities[1].fields.find((field: { name: string }) => field.name === "value").unique).toBe(true);
+    expect(model.entities.flatMap((entity: { fields: Array<{ primaryKey: boolean; foreignKey?: unknown }> }) => entity.fields)
+      .every((field: { primaryKey: boolean; foreignKey?: unknown }) => !field.primaryKey && !field.foreignKey)).toBe(true);
+    const profile = await request(app).post("/api/generation-profiles").send({ modelVersionId: imported.body.model.id }).expect(201);
+    await request(app).post("/api/datasets").send({ profileId: profile.body.profile.id, name: "Smart MDM data" }).expect(201);
+
+    const unsupported = structuredClone(schema);
+    unsupported.schema.fields[0].type = "unsupported";
+    await request(app).post("/api/models/import").send({ sourceFormat: "smart-mdm", content: JSON.stringify(unsupported) }).expect(400);
+    const wrongVersion = { ...schema, formatVersion: 2 };
+    await request(app).post("/api/models/import").send({ sourceFormat: "smart-mdm", content: JSON.stringify(wrongVersion) }).expect(400);
+    const unknownRule = structuredClone(schema);
+    Object.assign(unknownRule.schema.fields[1], { qualityRules: { min: 5 } });
+    await request(app).post("/api/models/import").send({ sourceFormat: "smart-mdm", content: JSON.stringify(unknownRule) }).expect(400);
+  });
+
   it("generates reproducible, referentially valid data and deliberate negative records with JSON/CSV exports", async () => {
     const modelContent = readFileSync(new URL("customer-address.canonical.json", sampleRoot), "utf8");
     const imported = await request(app).post("/api/models/import")

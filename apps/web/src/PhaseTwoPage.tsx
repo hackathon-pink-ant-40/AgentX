@@ -17,7 +17,8 @@ import type {
 
 type Props = { initialTab?: "models" | "data" };
 
-const sourceFormats: ModelSourceFormat[] = ["canonical", "json-schema", "mermaid"];
+const sourceFormats: ModelSourceFormat[] = ["canonical", "json-schema", "mermaid", "smart-mdm"];
+const smartMdmNotice = "Smart MDM fields are imported as separate entities. Relationships, match keys, collection limits, privacy labels, roles, and quality weights are not enforced. Dropdowns without options are unrestricted strings.";
 const scenarioOptions: Array<{ id: NegativeScenarioKind; label: string }> = [
   { id: "missing_required", label: "Missing required value" },
   { id: "null_required", label: "Null required value" },
@@ -101,7 +102,7 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
 
   useEffect(() => {
     const model = models[0];
-    if (!selectedModel && model) void selectModel(model.id);
+    if (!selectedModel && model) void selectModel(model.id).catch((loadError: unknown) => setError(messageOf(loadError)));
   }, [models, selectedModel]);
 
   useEffect(() => {
@@ -112,6 +113,20 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
   }, [activeProfileId, profiles]);
 
   const activeDataset = datasets.find((dataset) => dataset.id === activeDatasetId) ?? null;
+  const profileDirty = useMemo(() => {
+    const saved = profiles.find((profile) => profile.id === activeProfileId);
+    if (!saved || !profileDraft) return false;
+    try {
+      return JSON.stringify({
+        ...profileDraft, recordCounts: JSON.parse(recordCountsText), rules: JSON.parse(rulesText),
+      }) !== JSON.stringify(saved);
+    } catch {
+      return true;
+    }
+  }, [profiles, activeProfileId, profileDraft, recordCountsText, rulesText]);
+  useEffect(() => {
+    setPreview(null);
+  }, [activeProfileId, profileDirty]);
 
   const refreshRecords = useCallback(async (datasetId: string, page: number, search: string) => {
     const query = new URLSearchParams({ page: String(page), pageSize: "20" });
@@ -256,6 +271,32 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
     setImportContent(sample.content);
   }
 
+  function setImportDocument(content: string): void {
+    setImportContent(content);
+    try {
+      const parsed: unknown = JSON.parse(content);
+      if (typeof parsed === "object" && parsed !== null && "format" in parsed && parsed.format === "smart-mdm/schema") {
+        setSourceFormat("smart-mdm");
+      }
+    } catch {
+      // Incomplete JSON and Mermaid text are validated when imported.
+    }
+  }
+
+  async function loadFile(file: File | undefined): Promise<void> {
+    if (!file) return;
+    if (file.size > 100_000) {
+      setError("Model documents must be 100 KB or smaller.");
+      return;
+    }
+    try {
+      setImportDocument(await file.text());
+      setError("");
+    } catch (fileError) {
+      setError(messageOf(fileError));
+    }
+  }
+
   const mappingFields = useMemo(() => {
     try {
       const model = JSON.parse(modelContent) as CanonicalModel;
@@ -284,13 +325,15 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
         <div className="phase-columns">
           <div className="phase-stack">
             <section className="panel">
-              <div className="panel-header"><div><h2>Import a data model</h2><p>Canonical JSON, supported JSON Schema, or Mermaid ER.</p></div><span className="method-tag method-post">POST</span></div>
+              <div className="panel-header"><div><h2>Import a data model</h2><p>Canonical JSON, supported JSON Schema, Mermaid ER, or Smart MDM export.</p></div><span className="method-tag method-post">POST</span></div>
               <form className="phase-form" onSubmit={(event) => void importModel(event)}>
                 <div className="phase-inline">
                   <label>Format<select value={sourceFormat} onChange={(event) => setSourceFormat(event.target.value as ModelSourceFormat)}>{sourceFormats.map((format) => <option key={format} value={format}>{format}</option>)}</select></label>
                   <label>Load sample<select defaultValue="" onChange={(event) => void loadSample(event.target.value)}><option value="">Choose sample…</option>{samples.map((sample) => <option key={sample.name} value={sample.name}>{sample.name}</option>)}</select></label>
                 </div>
-                <label>Model document<textarea value={importContent} onChange={(event) => setImportContent(event.target.value)} required rows={11} placeholder="Paste a model document or load a sample" /></label>
+                <label>Upload model file<input type="file" accept=".json,.mmd,.mermaid,.txt,application/json,text/plain" onChange={(event) => void loadFile(event.currentTarget.files?.[0])} /></label>
+                <label>Model document<textarea value={importContent} onChange={(event) => setImportDocument(event.target.value)} required rows={11} placeholder="Paste a model document or load a sample" /></label>
+                {sourceFormat === "smart-mdm" && <p>{smartMdmNotice}</p>}
                 <button className="button button-primary" disabled={busy || !importContent.trim()}>Import model <span>→</span></button>
               </form>
             </section>
@@ -298,7 +341,7 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
               <div className="panel-header"><div><h2>Saved models</h2><p>Immutable versions are stored locally.</p></div><span className="live-tag"><i /> {models.length} MODEL{models.length === 1 ? "" : "S"}</span></div>
               {models.length === 0 ? <div className="phase-empty">Import a sample or your own model to begin.</div> : (
                 <div className="phase-model-list">{models.map((model) => (
-                  <button className={`phase-model-item ${selectedModel?.modelId === model.id ? "active" : ""}`} key={model.id} onClick={() => void selectModel(model.id)}>
+                  <button className={`phase-model-item ${selectedModel?.modelId === model.id ? "active" : ""}`} key={model.id} onClick={() => void selectModel(model.id).catch((loadError: unknown) => setError(messageOf(loadError)))}>
                     <span><strong>{model.name}</strong><small>Latest version {model.latestVersion}</small></span><b>→</b>
                   </button>
                 ))}</div>
@@ -312,6 +355,7 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
               </div>
               {selectedModel ? (
                 <div className="phase-form">
+                  {selectedModel.sourceFormat === "smart-mdm" && <p>{smartMdmNotice}</p>}
                   <div className="phase-entity-summary">{selectedModel.model.entities.map((entity) => (
                     <span key={entity.name}><strong>{entity.name}</strong>{entity.fields.length} fields · {entity.fields.filter((field) => field.primaryKey).length} PK</span>
                   ))}</div>
@@ -343,8 +387,8 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
             <div className="panel-header"><div><h2>Generation profile</h2><p>Configure localized Faker values, cardinality, field rules, and negative scenarios.</p></div><span className="method-tag method-post">PROFILE</span></div>
             <div className="phase-form">
               <div className="phase-inline">
-                <label>Profile<select value={activeProfileId} onChange={(event) => setActiveProfileId(event.target.value)}><option value="">Select a saved profile…</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
-                <label>Model version<select value={profileDraft?.modelVersionId ?? ""} disabled><option value="">Selected profile model version</option>{models.map((model) => <option key={model.latestVersionId} value={model.latestVersionId}>{model.name} · latest v{model.latestVersion}</option>)}</select></label>
+                <label>Profile<select value={activeProfileId} onChange={(event) => setActiveProfileId(event.target.value)}><option value="">Select a saved profile…</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name} · {profile.id.slice(0, 8)}</option>)}</select></label>
+                <label>Model version<select value={profileDraft?.modelVersionId ?? ""} disabled><option value="">Selected profile model version</option>{profileDraft && !models.some((model) => model.latestVersionId === profileDraft.modelVersionId) && <option value={profileDraft.modelVersionId}>Saved model version {profileDraft.modelVersionId}</option>}{models.map((model) => <option key={model.latestVersionId} value={model.latestVersionId}>{model.name} · latest v{model.latestVersion}</option>)}</select></label>
               </div>
               {!profileDraft ? <div className="phase-empty">Import and select a model, then choose “Create profile”.</div> : (
                 <>
@@ -366,14 +410,15 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
                       setProfileDraft({ ...profileDraft, negativeScenarios: selected });
                     }} />{scenario.label}</label>
                   ))}</div></div>
-                  <div className="phase-actions"><button className="button button-secondary" disabled={busy} onClick={() => void saveProfile()}>Save profile</button><button className="button button-primary" disabled={busy} onClick={() => void runPreview()}>Preview data <span>→</span></button></div>
+                  {profileDirty && <p role="status">Save profile changes before previewing or generating data.</p>}
+                  <div className="phase-actions"><button className="button button-secondary" disabled={busy} onClick={() => void saveProfile()}>Save profile</button><button className="button button-primary" disabled={busy || profileDirty} onClick={() => void runPreview()}>Preview data <span>→</span></button></div>
                 </>
               )}
             </div>
           </section>
 
           {preview && <section className="panel">
-            <div className="panel-header"><div><h2>Generation preview</h2><p>{preview.counts.total} valid records · deterministic preview</p></div><span className="live-tag"><i /> PREVIEW</span></div>
+            <div className="panel-header"><div><h2>Generation preview</h2><p>{preview.counts.total} records including scenarios · deterministic preview</p></div><span className="live-tag"><i /> PREVIEW</span></div>
             <div className="phase-counts">{Object.entries(preview.counts.entities).map(([entity, count]) => <span key={entity}><b>{count}</b>{entity}</span>)}</div>
             <RecordTable records={preview.records} />
           </section>}
@@ -382,7 +427,7 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
             <div className="panel-header"><div><h2>Generate a dataset</h2><p>Persist records and publish JSON/CSV exports locally.</p></div><span className="method-tag method-post">DATASET</span></div>
             <form className="phase-form phase-generate" onSubmit={(event) => void createDataset(event)}>
               <label>Dataset name<input value={datasetName} onChange={(event) => setDatasetName(event.target.value)} required maxLength={100} /></label>
-              <button className="button button-primary" disabled={busy || !activeProfileId}>Generate dataset <span>→</span></button>
+              <button className="button button-primary" disabled={busy || !activeProfileId || profileDirty}>Generate dataset <span>→</span></button>
             </form>
           </section>
 

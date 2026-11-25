@@ -3,7 +3,9 @@ import type {
   ConnectionInput,
   DatasetListResponse,
   DatasetManifest,
+  GenerationProfile,
   ReleasePolicy,
+  SprintCloseEvent,
   SystemConnection,
   TestResult,
   TestRun,
@@ -63,6 +65,13 @@ export default function PhaseThreePage({ initialTab = "configuration" }: { initi
   const [suiteId, setSuiteId] = useState("");
   const [connectionId, setConnectionId] = useState("");
   const [datasetId, setDatasetId] = useState("");
+  const [profiles, setProfiles] = useState<GenerationProfile[]>([]);
+  const [sprintProfileId, setSprintProfileId] = useState("");
+  const [sprintId, setSprintId] = useState("demo-sprint");
+  const [eventId, setEventId] = useState<string>(() => crypto.randomUUID());
+  const [workItems, setWorkItems] = useState("PBI-DEMO-MDM-LIFECYCLE, PBI-DEMO-MDM-NEGATIVE");
+  const [sprintEvent, setSprintEvent] = useState<SprintCloseEvent | null>(null);
+  const [trackedEventId, setTrackedEventId] = useState("");
   const [policies, setPolicies] = useState<ReleasePolicy[]>([]);
   const [policyId, setPolicyId] = useState("");
   const [selectedSuiteId, setSelectedSuiteId] = useState("");
@@ -89,16 +98,19 @@ export default function PhaseThreePage({ initialTab = "configuration" }: { initi
   const [notice, setNotice] = useState("");
 
   const refreshWorkspace = useCallback(async () => {
-    const [connectionResponse, suiteResponse, datasetResponse, runResponse, localDefault, policyResponse] = await Promise.all([
+    const [connectionResponse, suiteResponse, datasetResponse, runResponse, localDefault, policyResponse, profileResponse] = await Promise.all([
       apiRequest<{ connections: SystemConnection[] }>("/api/connections"),
       apiRequest<{ suites: Array<{ id: string; name: string; latestVersion: number; caseCount: number }> }>("/api/test-suites"),
       apiRequest<DatasetListResponse>("/api/datasets"),
       apiRequest<{ runs: TestRun[] }>("/api/test-runs"),
       apiRequest<{ baseUrl: string }>("/api/connections/local-default"),
       apiRequest<{ policies: ReleasePolicy[] }>("/api/release-policies"),
+      apiRequest<{ profiles: GenerationProfile[] }>("/api/generation-profiles"),
     ]);
     setConnections(connectionResponse.connections);
     setPolicies(policyResponse.policies);
+    setProfiles(profileResponse.profiles);
+    setSprintProfileId((current) => profileResponse.profiles.some((profile) => profile.id === current) ? current : profileResponse.profiles[0]?.id ?? "");
     setSuites(suiteResponse.suites);
     const readyDatasets = datasetResponse.datasets.filter((dataset) => dataset.status === "READY");
     setDatasets(readyDatasets);
@@ -157,6 +169,29 @@ export default function PhaseThreePage({ initialTab = "configuration" }: { initi
     };
   }, [selectedRunId]);
 
+  useEffect(() => {
+    if (!trackedEventId) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async (): Promise<void> => {
+      try {
+        const response = await apiRequest<{ event: SprintCloseEvent }>(`/api/sprint-events/${encodeURIComponent(trackedEventId)}`);
+        if (cancelled) return;
+        setSprintEvent(response.event);
+        if (response.event.runId) setSelectedRunId(response.event.runId);
+        if (response.event.status === "CREATING" || response.event.status === "RUNNING") {
+          timer = window.setTimeout(() => void poll(), 900);
+        } else {
+          await refreshWorkspace();
+        }
+      } catch (requestError) {
+        if (!cancelled) setError(requestError instanceof Error ? requestError.message : "Unable to load sprint event.");
+      }
+    };
+    void poll();
+    return () => { cancelled = true; if (timer !== undefined) window.clearTimeout(timer); };
+  }, [trackedEventId, refreshWorkspace]);
+
   async function perform(action: () => Promise<void>, successMessage: string): Promise<void> {
     setBusy(true);
     setError("");
@@ -173,16 +208,25 @@ export default function PhaseThreePage({ initialTab = "configuration" }: { initi
 
   async function loadDemoConfiguration(): Promise<void> {
     await perform(async () => {
-      const loaded = await apiRequest<{ connection: SystemConnection; suite: TestSuite }>("/api/demo/load", {
+      const loaded = await apiRequest<{ connection: SystemConnection; suite: TestSuite; profile: GenerationProfile }>("/api/demo/load", {
         method: "POST",
         body: JSON.stringify({}),
       });
       setConnectionId(loaded.connection.id);
       setSuiteId(loaded.suite.id);
+      setPolicyId("");
+      setSprintProfileId(loaded.profile.id);
       setSelectedSuiteId(loaded.suite.id);
       setSuiteDocument(JSON.stringify({ name: loaded.suite.name, cases: loaded.suite.cases }, null, 2));
       await refreshWorkspace();
-    }, "Demo connection and immutable acceptance suite are ready.");
+    }, "Demo model, profile, connection, acceptance suite, and policy are ready. Generate a dataset in Synthetic data.");
+  }
+
+  async function resetMock(): Promise<void> {
+    if (!window.confirm("Delete all local mock customers and addresses? Datasets and test evidence will be retained.")) return;
+    await perform(async () => {
+      await apiRequest("/api/demo/reset", { method: "POST", body: "{}" });
+    }, "Local mock customers and addresses cleared.");
   }
 
   async function saveConnection(event: React.FormEvent<HTMLFormElement>): Promise<void> {
@@ -316,6 +360,23 @@ export default function PhaseThreePage({ initialTab = "configuration" }: { initi
     }, "Cancellation requested.");
   }
 
+  async function startSprintEvent(): Promise<void> {
+    await perform(async () => {
+      const environment = connections.find((connection) => connection.id === connectionId)?.environment;
+      if (!environment) throw new Error("Select a connection before starting a sprint event.");
+      const response = await apiRequest<{ event: SprintCloseEvent }>("/api/sprint-events", {
+        method: "POST",
+        body: JSON.stringify({
+          eventId, sprintId, workItems: workItems.split(/[,\n]/).map((item) => item.trim()).filter(Boolean),
+          profileId: sprintProfileId, suiteId, connectionId, policyId: policyId || `default-${environment.toLowerCase()}`,
+        }),
+      });
+      setSprintEvent(response.event);
+      setTrackedEventId(response.event.input.eventId);
+      if (response.event.runId) setSelectedRunId(response.event.runId);
+    }, "Sprint event accepted. Reusing the same event ID and input will not start another run.");
+  }
+
   return (
     <div className="phase-three">
       {error && <div className="alert alert-error" role="alert"><strong>Request error</strong><span>{error}</span><button onClick={() => setError("")}>×</button></div>}
@@ -326,6 +387,7 @@ export default function PhaseThreePage({ initialTab = "configuration" }: { initi
         <div className="phase-actions">
           <button className="button button-secondary" disabled={busy} onClick={() => void perform(refreshWorkspace, "Workspace refreshed.")}>Refresh</button>
           <button className="button button-secondary" disabled={busy} onClick={() => void loadDemoConfiguration()}>Load demo configuration</button>
+          <button className="button button-secondary" disabled={busy} onClick={() => void resetMock()}>Reset mock data</button>
         </div>
       </section>
 
@@ -409,6 +471,31 @@ export default function PhaseThreePage({ initialTab = "configuration" }: { initi
               <button className="button button-primary" disabled={busy || !connectionId || !suiteId || !datasetId} onClick={() => void startRun()}>Start run <span>→</span></button>
             </div>
             {datasets.length === 0 && <div className="phase-three-callout">Generate a READY dataset in Synthetic data before starting a run.</div>}
+          </section>
+
+          <section className="panel">
+            <div className="panel-header"><div><h2>Simulate sprint close</h2><p>Local only: validate linked work items, generate a dataset, execute the selected suite, and evaluate its gate.</p></div></div>
+            <div className="phase-form">
+              <div className="phase-inline">
+                <label>Sprint ID<input value={sprintId} onChange={(event) => setSprintId(event.target.value)} /></label>
+                <label>Event ID<input value={eventId} onChange={(event) => { setEventId(event.target.value); setTrackedEventId(""); setSprintEvent(null); }} /></label>
+                <label>Dataset profile<select value={sprintProfileId} onChange={(event) => setSprintProfileId(event.target.value)}><option value="">Select profile…</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name} · {profile.id.slice(0, 8)}</option>)}</select></label>
+              </div>
+              <label>Linked work items (comma or newline separated)<textarea rows={2} value={workItems} onChange={(event) => setWorkItems(event.target.value)} /></label>
+              <p className="phase-help">Uses the connection, suite, and policy selected above. Cases already saved in the suite are treated as locally approved mappings; missing mappings block the event.</p>
+              <div className="phase-actions">
+                <button className="button button-primary" disabled={busy || !eventId.trim() || !sprintId.trim() || !workItems.trim() || !sprintProfileId || !suiteId || !connectionId} onClick={() => void startSprintEvent()}>Simulate sprint close</button>
+                <button className="button button-secondary" disabled={busy || !eventId.trim()} onClick={() => { setSprintEvent(null); setTrackedEventId(eventId.trim()); if (trackedEventId === eventId.trim()) void perform(async () => { const result = await apiRequest<{ event: SprintCloseEvent }>(`/api/sprint-events/${encodeURIComponent(eventId.trim())}`); setSprintEvent(result.event); }, "Event refreshed."); }}>Check event</button>
+                <button className="button button-secondary" disabled={busy} onClick={() => { setEventId(crypto.randomUUID()); setTrackedEventId(""); setSprintEvent(null); }}>New event ID</button>
+              </div>
+              {sprintEvent && <div role="status"><strong>{sprintEvent.status}{sprintEvent.decision ? ` · ${sprintEvent.decision}` : ""}</strong>
+                {sprintEvent.gaps.length > 0 && <p>Missing test mappings: {sprintEvent.gaps.join(", ")}</p>}
+                {sprintEvent.error && <p>{sprintEvent.error}</p>}
+                {sprintEvent.datasetId && <p>Dataset: {sprintEvent.datasetId}</p>}
+                {sprintEvent.runId && <p>Run: {sprintEvent.runId}</p>}
+                {sprintEvent.gate && <ul>{sprintEvent.gate.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>}
+              </div>}
+            </div>
           </section>
 
           <div className="phase-three-grid phase-three-execution">

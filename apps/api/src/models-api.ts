@@ -290,7 +290,7 @@ export function createModelsApiRouter(
         routeParameter(request, "kind"),
         optionalQuery(request.query.entity, "entity", 80),
       );
-      response.type(file.contentType).download(file.path, file.downloadName, (error) => {
+      response.type(file.contentType).download(file.path, file.downloadName, { dotfiles: "allow" }, (error) => {
         if (error) next(error);
       });
     } catch (error) {
@@ -441,7 +441,7 @@ function mergeRules(
   return result;
 }
 
-function getProfile(database: Database.Database, profileId: unknown): GenerationProfile {
+export function getProfile(database: Database.Database, profileId: unknown): GenerationProfile {
   const id = stringValue(profileId, "Profile ID", 80);
   const row = database.prepare(`
     SELECT id, model_version_id, name, settings_json, created_at, updated_at
@@ -449,6 +449,46 @@ function getProfile(database: Database.Database, profileId: unknown): Generation
   `).get(id) as ProfileRow | undefined;
   if (!row) throw new HttpError(404, "GENERATION_PROFILE_NOT_FOUND", `Generation profile ${id} was not found.`);
   return profileFromRow(row);
+}
+
+export function loadDemoModelAndProfile(database: Database.Database): { model: ModelVersion; profile: GenerationProfile } {
+  const saved = database.prepare("SELECT value FROM demo_settings WHERE key = 'demo_model_version_id'").get() as { value: string } | undefined;
+  let row = saved ? database.prepare(`
+    SELECT id, model_id, version, source_format, model_json, created_at FROM model_versions WHERE id = ?
+  `).get(saved.value) as ModelVersionRow | undefined : undefined;
+  if (!row) {
+    const source = readFileSync(resolve(projectRoot, "samples", "customer-address.canonical.json"), "utf8");
+    const model = importModel("canonical", source);
+    const modelId = randomUUID();
+    const versionId = randomUUID();
+    const now = new Date().toISOString();
+    model.modelId = modelId;
+    model.version = 1;
+    database.prepare("INSERT INTO data_models (id, name, latest_version, created_at, updated_at) VALUES (?, ?, 1, ?, ?)")
+      .run(modelId, model.name, now, now);
+    database.prepare(`INSERT INTO model_versions (id, model_id, version, source_format, source_text, model_json, created_at)
+      VALUES (?, ?, 1, 'canonical', ?, ?, ?)`).run(versionId, modelId, source, JSON.stringify(model), now);
+    database.prepare("INSERT OR REPLACE INTO demo_settings (key, value) VALUES ('demo_model_version_id', ?)").run(versionId);
+    row = { id: versionId, model_id: modelId, version: 1, source_format: "canonical", model_json: JSON.stringify(model), created_at: now };
+  }
+  const model: ModelVersion = {
+    id: row.id, modelId: row.model_id, version: row.version, sourceFormat: row.source_format,
+    model: JSON.parse(row.model_json) as CanonicalModel, createdAt: row.created_at,
+  };
+  const profileSetting = database.prepare("SELECT value FROM demo_settings WHERE key = 'demo_profile_id'").get() as { value: string } | undefined;
+  const existing = profileSetting
+    ? database.prepare("SELECT id FROM generation_profiles WHERE id = ?").get(profileSetting.value) as { id: string } | undefined
+    : undefined;
+  if (existing) return { model, profile: getProfile(database, existing.id) };
+  const id = randomUUID();
+  const draft = createDefaultProfile(model.model, model.id, id);
+  draft.negativeScenarios = ["orphan_fk"];
+  validateProfile(draft, model.model);
+  const { id: _profileId, createdAt, updatedAt, ...settings } = draft;
+  database.prepare(`INSERT INTO generation_profiles (id, model_version_id, name, settings_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)`).run(id, model.id, draft.name, JSON.stringify(settings), createdAt, updatedAt);
+  database.prepare("INSERT OR REPLACE INTO demo_settings (key, value) VALUES ('demo_profile_id', ?)").run(id);
+  return { model, profile: draft };
 }
 
 function profileFromRow(row: ProfileRow): GenerationProfile {
@@ -463,8 +503,8 @@ function modelForVersion(database: Database.Database, modelVersionId: string): C
 }
 
 function parseSourceFormat(value: unknown): ModelSourceFormat {
-  if (value !== "canonical" && value !== "json-schema" && value !== "mermaid") {
-    throw new HttpError(400, "INVALID_MODEL_FORMAT", "sourceFormat must be canonical, json-schema, or mermaid.");
+  if (value !== "canonical" && value !== "json-schema" && value !== "mermaid" && value !== "smart-mdm") {
+    throw new HttpError(400, "INVALID_MODEL_FORMAT", "sourceFormat must be canonical, json-schema, mermaid, or smart-mdm.");
   }
   return value;
 }

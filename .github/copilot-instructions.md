@@ -1,7 +1,7 @@
 # Repository instructions for Copilot
 
 ## Project shape
-- This is TestAgent AI, a local-first, single-user synthetic-data and REST API quality workbench.
+- This is AgentX, a local-first, single-user synthetic-data and REST API quality workbench.
 - Use the npm workspaces in `apps/web`, `apps/api`, and `packages/shared`; keep cross-workspace API payloads in `@agentx/shared`.
 - Follow the phases in `docs/implementation-plan.md` and `MASTER_PROMPT.md`. Complete and validate a vertical slice before starting later-phase features.
 - Do not add non-functional screens or fabricated data/results. UI metrics must come from persisted backend data.

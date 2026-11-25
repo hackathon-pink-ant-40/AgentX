@@ -12,7 +12,10 @@ import type { NextFunction, Request, Response } from "express";
 import { Router } from "express";
 import { DatasetService } from "./dataset-service.js";
 import { demoSuiteName, demoTestCases } from "./demo-tests.js";
+import { resetMockData } from "./demo-reset.js";
 import { HttpError } from "./http-error.js";
+import { getPolicy } from "./analytics.js";
+import { loadDemoModelAndProfile } from "./models-api.js";
 import { TestRunService } from "./test-runner.js";
 import {
   connectionFromRow,
@@ -312,7 +315,7 @@ export function createExecutionApiRouter(
 
   router.get("/test-runs/:id/log", route((request, response) => {
     const id = routeId(request, "id");
-    response.download(runService.logFile(id), `${id}.jsonl`);
+    response.download(runService.logFile(id), `${id}.jsonl`, { dotfiles: "allow" });
   }));
 
   router.post("/demo/load", route((request, response) => {
@@ -328,22 +331,36 @@ export function createExecutionApiRouter(
       maxConcurrency: 1,
       enabled: true,
     }, port);
-    const existingConnection = database.prepare("SELECT id FROM connections WHERE name = ? ORDER BY created_at LIMIT 1")
-      .get(connectionInput.name) as { id: string } | undefined;
-    const connection = existingConnection
-      ? updateConnection(database, existingConnection.id, connectionInput)
-      : insertConnection(database, connectionInput);
+    const loaded = database.transaction(() => {
+      const demoData = loadDemoModelAndProfile(database);
+      const savedConnection = database.prepare("SELECT value FROM demo_settings WHERE key = 'demo_connection_id'").get() as { value: string } | undefined;
+      const connectionRow = savedConnection
+        ? database.prepare("SELECT * FROM connections WHERE id = ?").get(savedConnection.value) as ConnectionRow | undefined
+        : undefined;
+      const currentConnection = connectionRow ? connectionFromRow(connectionRow) : undefined;
+      const connection = currentConnection
+        ? (sameConnection(currentConnection, connectionInput) ? currentConnection : updateConnection(database, currentConnection.id, connectionInput))
+        : insertConnection(database, connectionInput);
+      database.prepare("INSERT OR REPLACE INTO demo_settings (key, value) VALUES ('demo_connection_id', ?)").run(connection.id);
 
-    const suiteRow = database.prepare("SELECT id FROM test_suites WHERE name = ? ORDER BY created_at LIMIT 1")
-      .get(demoSuiteName) as { id: string } | undefined;
-    const demoSuite = normalizeSuite({ name: demoSuiteName, cases: demoTestCases });
-    const currentSuite = suiteRow ? getSuite(database, suiteRow.id) : undefined;
-    const suite = currentSuite
-      ? (sameCases(currentSuite.cases, demoSuite.cases) && currentSuite.name === demoSuite.name
-        ? currentSuite
-        : saveSuiteVersion(database, demoSuite, currentSuite.id))
-      : saveSuiteVersion(database, demoSuite);
-    response.json({ connection, suite });
+      const savedSuite = database.prepare("SELECT value FROM demo_settings WHERE key = 'demo_suite_id'").get() as { value: string } | undefined;
+      const suiteRow = savedSuite ? database.prepare("SELECT id FROM test_suites WHERE id = ?").get(savedSuite.value) as { id: string } | undefined : undefined;
+      const demoSuite = normalizeSuite({ name: demoSuiteName, cases: demoTestCases });
+      const currentSuite = suiteRow ? getSuite(database, suiteRow.id) : undefined;
+      const suite = currentSuite
+        ? (sameCases(currentSuite.cases, demoSuite.cases) && currentSuite.name === demoSuite.name
+          ? currentSuite
+          : saveSuiteVersion(database, demoSuite, currentSuite.id))
+        : saveSuiteVersion(database, demoSuite);
+      database.prepare("INSERT OR REPLACE INTO demo_settings (key, value) VALUES ('demo_suite_id', ?)").run(suite.id);
+      return { ...demoData, connection, suite, policy: getPolicy(database, "default-demo", "DEMO") };
+    })();
+    response.json(loaded);
+  }));
+
+  router.post("/demo/reset", route((_request, response) => {
+    resetMockData(database);
+    response.json({ reset: true });
   }));
 
   router.use((error: unknown, _request: Request, response: Response, next: NextFunction) => {
@@ -411,7 +428,7 @@ function updateConnection(database: Database.Database, id: string, input: Connec
   return getConnection(database, id);
 }
 
-function getSuite(database: Database.Database, id: string): TestSuite {
+export function getSuite(database: Database.Database, id: string): TestSuite {
   const row = database.prepare(`
     SELECT s.id, v.suite_name AS name, s.current_version, s.created_at, s.updated_at,
       v.id AS version_id, v.cases_json
@@ -456,4 +473,9 @@ function saveSuiteVersion(database: Database.Database, input: TestSuiteInput, su
 
 function sameCases(left: TestCaseDefinition[], right: TestCaseDefinition[]): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function sameConnection(current: SystemConnection, input: ConnectionInput): boolean {
+  const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...settings } = current;
+  return JSON.stringify(settings) === JSON.stringify(input);
 }

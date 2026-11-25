@@ -59,7 +59,13 @@ export class DeterministicRuleSuggestionProvider implements RuleSuggestionProvid
       return suggestion({ kind: "streetAddress" }, 0.91, "The field name indicates a localized synthetic street address.");
     }
     if (name.includes("postalcode") || name.includes("zipcode")) {
-      return suggestion({ kind: "postalCode", countryField: "countryCode" }, 0.94, "Postal codes use the selected country rule and Faker locale.");
+      const country = entity.fields.find((candidate) => normalizedName(candidate.name) === "countrycode")
+        ?? entity.fields.find((candidate) => normalizedName(candidate.name) === "country");
+      return suggestion(
+        { kind: "postalCode", ...(country ? { countryField: country.name } : {}) },
+        0.94,
+        "Postal codes use the selected country rule and Faker locale.",
+      );
     }
     if (name === "country" || name === "countrycode") {
       return suggestion(
@@ -120,6 +126,12 @@ export function importModel(
     throw new HttpError(400, "INVALID_MODEL_JSON", `Model document is not valid JSON: ${reason}`);
   }
 
+  if (sourceFormat === "smart-mdm") {
+    return normalizeCanonicalModel(smartMdmToCanonical(parsed), provider);
+  }
+  if (isObject(parsed) && parsed.format === "smart-mdm/schema") {
+    throw new HttpError(400, "WRONG_MODEL_FORMAT", "This is a Smart MDM export. Select the smart-mdm import format.");
+  }
   if (sourceFormat === "json-schema") {
     return normalizeCanonicalModel(jsonSchemaToCanonical(parsed), provider);
   }
@@ -236,6 +248,59 @@ export function topologicalEntities(model: CanonicalModel): ModelEntity[] {
 
   for (const entity of model.entities) visit(entity);
   return sorted;
+}
+
+function smartMdmToCanonical(input: unknown): unknown {
+  if (!isObject(input) || input.format !== "smart-mdm/schema" || input.formatVersion !== 1 || !isObject(input.schema)) {
+    throw new HttpError(400, "INVALID_SMART_MDM_SCHEMA", "Expected a smart-mdm/schema export with formatVersion 1 and a schema object.");
+  }
+  assertKnownKeys(input, new Set(["format", "formatVersion", "domain", "domainLabel", "exportedAt", "schema"]), "Smart MDM export");
+  assertKnownKeys(input.schema, new Set(["fields", "children", "roles"]), "Smart MDM schema");
+  const domain = stringValue(input.domain, "Smart MDM domain", 80);
+  const name = stringValue(input.domainLabel, "Smart MDM domain label", 120);
+  if (!Array.isArray(input.schema.fields) || !Array.isArray(input.schema.children)) {
+    throw new HttpError(400, "INVALID_SMART_MDM_SCHEMA", "Smart MDM schema must contain fields and children arrays.");
+  }
+  const fields = (values: unknown[], entity: string): Array<Record<string, unknown>> => values.map((value) => {
+    if (!isObject(value)) throw new HttpError(400, "INVALID_SMART_MDM_SCHEMA", `${entity} fields must be objects.`);
+    assertKnownKeys(value, new Set(["key", "label", "type", "required", "options", "core", "pii", "description", "qualityRules"]), `${entity} field`);
+    const field = stringValue(value.key, `${entity} field key`, 80);
+    if (typeof value.required !== "boolean") {
+      throw new HttpError(400, "INVALID_SMART_MDM_SCHEMA", `${entity}.${field} must declare whether it is required.`);
+    }
+    const type: ModelFieldType | undefined = value.type === "text" || value.type === "dropdown" ? "string"
+      : value.type === "boolean" ? "boolean" : value.type === "date" ? "date" : undefined;
+    if (!type) throw new HttpError(400, "UNSUPPORTED_FIELD_TYPE", `${entity}.${field} uses unsupported Smart MDM type ${String(value.type)}.`);
+    if (value.options !== undefined && (!Array.isArray(value.options) || value.options.some((option) => typeof option !== "string" || !option))) {
+      throw new HttpError(400, "INVALID_SMART_MDM_SCHEMA", `${entity}.${field} options must be an array of non-empty strings.`);
+    }
+    if (Array.isArray(value.options) && value.options.length > 0 && value.type !== "dropdown") {
+      throw new HttpError(400, "INVALID_SMART_MDM_SCHEMA", `${entity}.${field} options are supported only for dropdown fields.`);
+    }
+    if (value.qualityRules !== undefined && !isObject(value.qualityRules)) {
+      throw new HttpError(400, "INVALID_SMART_MDM_SCHEMA", `${entity}.${field} qualityRules must be an object.`);
+    }
+    const quality = isObject(value.qualityRules) ? value.qualityRules : {};
+    assertKnownKeys(quality, new Set(["unique", "weight"]), `${entity}.${field} qualityRules`);
+    if (quality.unique !== undefined && typeof quality.unique !== "boolean") {
+      throw new HttpError(400, "INVALID_SMART_MDM_SCHEMA", `${entity}.${field} qualityRules.unique must be boolean.`);
+    }
+    return {
+      name: field, type, required: value.required, nullable: !value.required,
+      ...(Array.isArray(value.options) && value.options.length > 0 ? { enum: value.options } : {}),
+      ...(quality.unique === true ? { unique: true } : {}),
+    };
+  });
+  const entities = [{ name: domain, fields: fields(input.schema.fields, domain) }];
+  for (const child of input.schema.children) {
+    if (!isObject(child) || !Array.isArray(child.fields)) {
+      throw new HttpError(400, "INVALID_SMART_MDM_SCHEMA", "Each Smart MDM child must contain a fields array.");
+    }
+    assertKnownKeys(child, new Set(["key", "label", "fields", "absence", "matchKey", "maxOccurrences"]), "Smart MDM child");
+    const childName = stringValue(child.key, "Smart MDM child key", 80);
+    entities.push({ name: childName, fields: fields(child.fields, childName) });
+  }
+  return { name, entities };
 }
 
 function jsonSchemaToCanonical(input: unknown): unknown {
