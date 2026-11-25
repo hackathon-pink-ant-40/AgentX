@@ -1,0 +1,18 @@
+erDiagram
+  Customer ||--|{ Address : has
+  Customer {
+    string customerId PK
+    string firstName
+    string lastName
+    string displayName
+    string email UK
+    string status
+    date dateOfBirth
+  }
+  Address {
+    string addressId PK
+    string customerId FK
+    string street
+    string postalCode
+    string countryCode
+  }

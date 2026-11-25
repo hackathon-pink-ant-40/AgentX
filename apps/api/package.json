@@ -1,0 +1,28 @@
+{
+  "name": "@agentx/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --import tsx --watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "demo:reset": "node --import tsx src/reset-demo.ts"
+  },
+  "dependencies": {
+    "@agentx/shared": "0.1.0",
+    "@faker-js/faker": "^10.6.0",
+    "ajv": "^8.20.0",
+    "better-sqlite3": "^12.2.0",
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.3.0",
+    "@types/supertest": "^6.0.3",
+    "supertest": "^7.1.4",
+    "tsx": "^4.20.5",
+    "vitest": "^5.1.1"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "Customer Master",
+  "entities": [
+    {
+      "name": "Customer",
+      "fields": [
+        { "name": "customerId", "type": "string", "required": true, "primaryKey": true },
+        { "name": "firstName", "type": "string", "required": true, "length": { "min": 2, "max": 48 } },
+        { "name": "lastName", "type": "string", "required": true, "length": { "min": 2, "max": 64 } },
+        { "name": "displayName", "type": "string" },
+        { "name": "email", "type": "string", "format": "email", "unique": true, "required": true },
+        { "name": "status", "type": "string", "enum": ["ACTIVE", "INACTIVE", "PROSPECT"], "required": true },
+        { "name": "dateOfBirth", "type": "date", "nullable": true }
+      ]
+    },
+    {
+      "name": "Address",
+      "fields": [
+        { "name": "addressId", "type": "string", "required": true, "primaryKey": true },
+        {
+          "name": "customerId",
+          "type": "string",
+          "required": true,
+          "foreignKey": { "entity": "Customer", "field": "customerId" },
+          "cardinality": { "min": 1, "max": 2 }
+        },
+        { "name": "street", "type": "string", "required": true, "length": { "min": 4, "max": 80 } },
+        { "name": "postalCode", "type": "string", "required": true },
+        { "name": "countryCode", "type": "string", "enum": ["NL", "GB", "DE"], "required": true }
+      ]
+    }
+  ]
+}

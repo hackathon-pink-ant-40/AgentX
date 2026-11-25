@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Customer Master Schema",
+  "type": "object",
+  "properties": {
+    "Customer": { "$ref": "#/$defs/Customer" },
+    "Address": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Address" }
+    }
+  },
+  "$defs": {
+    "Customer": {
+      "type": "object",
+      "properties": {
+        "customerId": { "type": "string", "x-primaryKey": true },
+        "firstName": { "type": "string", "minLength": 2, "maxLength": 48 },
+        "lastName": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "displayName": { "type": "string" },
+        "email": { "type": "string", "format": "email", "x-unique": true },
+        "status": { "type": "string", "enum": ["ACTIVE", "INACTIVE", "PROSPECT"] },
+        "dateOfBirth": { "type": ["string", "null"], "format": "date" }
+      },
+      "required": ["customerId", "firstName", "lastName", "email", "status"],
+      "additionalProperties": false
+    },
+    "Address": {
+      "type": "object",
+      "properties": {
+        "addressId": { "type": "string", "x-primaryKey": true },
+        "customerId": {
+          "type": "string",
+          "x-foreignKey": { "entity": "Customer", "field": "customerId" },
+          "x-cardinality": { "min": 1, "max": 2 }
+        },
+        "street": { "type": "string", "minLength": 4, "maxLength": 80 },
+        "postalCode": { "type": "string" },
+        "countryCode": { "type": "string", "enum": ["NL", "GB", "DE"] }
+      },
+      "required": ["addressId", "customerId", "street", "postalCode", "countryCode"],
+      "additionalProperties": false
+    }
+  }
+}
