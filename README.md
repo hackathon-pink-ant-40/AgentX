@@ -67,9 +67,17 @@ Invoke-RestMethod -Method Post `
 
 ## Model and synthetic-data workflow
 
-The **Data models** screen imports canonical JSON, the supported JSON Schema subset (including local `$ref`), Mermaid `erDiagram` input, or version 1 `smart-mdm/schema` exports. Smart MDM exports are detected when pasted or uploaded. The **Synthetic data** screen configures per-entity counts, locale, seed, reference date, attribute rules, and deliberate negative scenarios; it previews and persists records, then offers paginated search and JSON/CSV downloads. Example Customer/Address inputs are available under [samples/](samples/).
+The **Data models** screen imports canonical JSON, the supported JSON Schema subset (including local `$ref`), Mermaid `erDiagram` input, version 1 `smart-mdm/schema` exports, or extended canonical documents marked `TestAgent canonical entities/fields JSON`. Recognized formats are detected when pasted or uploaded. Enter an optional model name to override the document's name; leave it blank to keep the imported name. The **Synthetic data** screen configures per-entity counts, locale, seed, reference date, attribute rules, and deliberate negative scenarios; it previews and persists records, then offers paginated search and JSON/CSV downloads. Example Customer/Address inputs are available under [samples/](samples/).
 
 Smart MDM import maps the domain and each child to separate entities, retaining field keys, text/dropdown/boolean/date types, required flags, dropdown options, and `qualityRules.unique`. It does **not** create primary keys or parent/child links, or enforce match keys, collection limits, roles, privacy labels, or quality weights. Dropdowns without options become unrestricted strings. Review the model before use; privacy labels do not establish access control. Unknown constructs and unsupported versions or field types are rejected.
+
+Extended canonical import is **partial**: supported fields, PK/FK mappings, basic field constraints, and single-field uniqueness are retained. Business rules, composite uniqueness, subtypes, reference data, generation rules (including approved-fixture requirements), privacy metadata, relationship metadata beyond field FKs, and other extended metadata are not enforced. UUID and date-time formats are retained but are not validated. The original source is stored with the imported version. Profile creation is blocked for that version: review the original document, then explicitly acknowledge these omissions when saving an editable canonical version. Configure and verify safe generation rules and approved identifier fixtures before generating; acknowledging does not implement omitted constraints.
+
+New profiles use date-compatible rules for strings with `date` or `date-time` formats. For an older saved profile with generic string rules on those fields, save any unsaved edits and choose **Fix date-format rules**. After confirmation, only those string rules are replaced; string-specific settings such as patterns and lengths are removed. Review the resulting date ranges and all other rules before generating.
+
+String rules without an explicit rule pattern use the model field's pattern when present, including in existing profiles. A rule-specific pattern takes precedence and must still satisfy the model constraint. A pattern such as `^[A-Z]{2}$` checks shape, not whether a value is a real country code; configure an explicit enum if the allowed values matter.
+
+For a unique foreign key, each generated child needs a distinct parent. New profiles default to at most one child per parent; existing profile counts are not changed automatically. If a count is too high, edit **Per-entity record counts (JSON)** and save the profile. For example, with 20 Party records, use at most 20 Person records when `Person.partyId` is unique. The allocator conservatively requires enough parents even for nullable unique foreign keys; explicit relationship cardinality also applies.
 
 JSON Schema import requires an object root with entity object schemas in root properties or `$defs`/`definitions`; supported keywords are `$schema`, `$id`, `$defs`, `definitions`, `$ref`, `title`, `description`, `type`, `properties`, `required`, `items`, `additionalProperties`, `format`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength`, `pattern`, `nullable`, `default`, and the `x-primaryKey`, `x-unique`, `x-foreignKey`, and `x-cardinality` extensions. Only nonrecursive local references are supported; unsupported keywords and remote references are rejected.
 
@@ -80,12 +88,13 @@ Model versions, profiles, datasets, and records are persisted in SQLite. Exports
 | Method | Path | Behavior |
 | --- | --- | --- |
 | GET | `/api/models/samples` | Retrieve the bundled canonical, JSON Schema, and Mermaid samples |
-| POST | `/api/models/import` | Validate and import a model document |
+| POST | `/api/models/import` | Validate and import a model document; optional `name` overrides the imported name |
 | GET | `/api/models` | List models and latest versions |
 | GET | `/api/models/:id` | Read the latest version and version history |
 | POST | `/api/models/:id/versions` | Validate and save an immutable canonical model version |
 | GET, POST | `/api/generation-profiles` | List profiles or create one with suggested defaults |
 | PATCH | `/api/generation-profiles/:id` | Update a profile after validation |
+| POST | `/api/generation-profiles/:id/repair-date-rules` | Explicitly replace saved string rules on date-formatted fields with date rules |
 | POST | `/api/datasets/preview` | Preview a deterministic profile without persistence |
 | POST | `/api/datasets` | Generate, persist, and publish a ready dataset |
 | GET | `/api/datasets` | List ready datasets |
@@ -96,6 +105,10 @@ Model versions, profiles, datasets, and records are persisted in SQLite. Exports
 ## Test configuration and execution
 
 The **Test configuration** screen manages local system connections and JSON-defined suites. Suite and case edits create immutable versions. Templates map selected synthetic records and prior step results into HTTP paths and JSON payloads; suites can define expected statuses, JSON Schema response checks, JSON-path assertions, extracted values, and case dependencies. **Load demo configuration** installs an idempotent Customer MDM acceptance suite covering insert, update, read-back, merge, address reparenting, duplicate-ID rejection, missing-required-field rejection, and orphan-address rejection.
+
+For an Excel upload demonstration, download the populated example template in **Test configuration**, edit and save it as `.xlsx`, select it, and choose **Simulate upload**. This is a mock-up: only the filename extension is checked, the workbook is not read or sent to the server, and no suite is validated, created, or run. The workbook is illustrative, not an import specification; use the Suite JSON editor to create a runnable suite.
+
+For a focused runnable demo, choose **Load customer & address example** in the suite editor, then **Create suite**. Generate or select a READY dataset from the Customer/Address sample model and run **Demo - Create customer and add address** with the local connection. The suite creates and reads back generated Customers, and separately creates an owner and adds and reads back each generated Address. Each address case uses a new prerequisite customer named Demo Address Owner rather than the dataset's related Customer. Customer names and emails and address fields come from the selected synthetic dataset. Runs use unique IDs and real assertions; results are not guaranteed and may fail if data or the service is incompatible. The suite JSON is also available in [samples/customer-address-demo-suite.json](samples/customer-address-demo-suite.json).
 
 Execution is deliberately restricted to `http://127.0.0.1:<API-port>/api/mock-api` on the same API process. Redirects are not followed, request and response sizes and execution time are bounded, and authentication credentials must be referenced by environment-variable name. The browser does not send credentials or call external targets. Generate a `READY` Customer/Address dataset with the `orphan_fk` negative scenario enabled to exercise the orphan-address rejection case; cases without matching inputs are reported as `BLOCKED`, not silently skipped.
 
@@ -150,6 +163,6 @@ This is a local single-user demo without authentication or RBAC; only the same-p
 
 The latest isolated end-to-end QA used an uploaded Customer/Address model and a fixed-seed profile: 20 Customers, 30 Addresses, and one deliberate orphan; FK/cardinality checks and deterministic regeneration passed. The baseline execution produced **61 PASS, GO**; the actual merge regression produced **21 PASS, 20 FAIL, 20 BLOCKED, NO-GO**. Sprint-close runs produced the same decisions, a missing work-item mapping produced NO-GO without a run, and both decisions survived API restart. Browser checks covered charts, audit request/response evidence, and downloads; run JSONL step-event counts matched persisted steps (201 baseline, 141 regression). These outcomes describe that isolated test configuration, not a guarantee for edited profiles or policies.
 
-The final `npm.cmd run build` succeeded and `npm.cmd test` passed 17 tests across 3 files.
+The final `npm.cmd run build` succeeded and `npm.cmd test` passed 23 tests across 3 files.
 
 See [.github/copilot-instructions.md](.github/copilot-instructions.md) for repository conventions and [MASTER_PROMPT.md](MASTER_PROMPT.md) for the full build specification.

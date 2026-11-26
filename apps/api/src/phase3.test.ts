@@ -15,6 +15,7 @@ import { recoverSprintEvents } from "./sprint-close.js";
 import { demoSuiteName, demoTestCases } from "./demo-tests.js";
 
 const sampleModel = readFileSync(new URL("../../../samples/customer-address.canonical.json", import.meta.url), "utf8");
+const customerAddressDemoSuite = JSON.parse(readFileSync(new URL("../../../samples/customer-address-demo-suite.json", import.meta.url), "utf8"));
 
 describe("Phase 3 test configuration and execution", () => {
   let directory: string;
@@ -142,6 +143,32 @@ describe("Phase 3 test configuration and execution", () => {
       .get(`/api/test-suites/${demo.suiteId}/versions/${original.body.suite.version}`).expect(200);
     expect(firstVersion.body.suite.name).toBe(original.body.suite.name);
     expect(firstVersion.body.suite.cases).toEqual(original.body.suite.cases);
+  });
+
+  it("runs the customer and address example with generated records on repeat", async () => {
+    const demo = await loadDemo();
+    const datasetId = await createDataset();
+    const suite = await request(baseUrl).post("/api/test-suites").send(customerAddressDemoSuite).expect(201);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const created = await request(baseUrl).post("/api/test-runs")
+        .send({ connectionId: demo.connectionId, suiteId: suite.body.suite.id, datasetId }).expect(202);
+      const run = await waitForTerminalRun(created.body.run.id);
+      expect(run.status).toBe("COMPLETED");
+      expect(run.counters).toMatchObject({ planned: 2, passed: 2, failed: 0, errors: 0, blocked: 0 });
+      const results = (await request(baseUrl).get(`/api/test-runs/${run.id}/results`).expect(200)).body.results as Array<{
+        caseId: string;
+        status: string;
+        steps: Array<{ responseStatus: number; assertions: Array<{ passed: boolean }> }>;
+      }>;
+      expect(results).toHaveLength(2);
+      expect(results.every((result) => result.status === "PASS" && result.steps.every((step) =>
+        step.assertions.every((assertion) => assertion.passed)))).toBe(true);
+      expect(results.find((result) => result.caseId === "createCustomer")?.steps.map((step) => step.responseStatus)).toEqual([201, 200]);
+      expect(results.find((result) => result.caseId === "addAddress")?.steps.map((step) => step.responseStatus)).toEqual([201, 201, 200]);
+      const analytics = await request(baseUrl).get(`/api/analytics/runs/${run.id}`).expect(200);
+      expect(analytics.body.metrics).toMatchObject({ passRate: 100, coverage: 100 });
+      expect(analytics.body.gate.decision).toBe("GO");
+    }
   });
 
   it("resolves relative log paths from the repository root", async () => {

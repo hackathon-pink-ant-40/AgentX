@@ -65,6 +65,35 @@ describe("model-driven synthetic data API", () => {
       .toHaveLength(2);
   });
 
+  it("uses an optional import name and keeps saved model names in sync with versions", async () => {
+    const fixtures = [
+      ["canonical", "customer-address.canonical.json"],
+      ["json-schema", "customer-address.schema.json"],
+      ["mermaid", "customer-address.mmd"],
+    ] as const;
+    for (const [sourceFormat, fileName] of fixtures) {
+      const content = readFileSync(new URL(fileName, sampleRoot), "utf8");
+      const imported = await request(app).post("/api/models/import")
+        .send({ sourceFormat, content, name: "  Banking model  " }).expect(201);
+      expect(imported.body.model.model.name).toBe("Banking model");
+      const saved = await request(app).get(`/api/models/${imported.body.model.modelId}`).expect(200);
+      expect(saved.body.model.model.name).toBe("Banking model");
+    }
+    const content = readFileSync(new URL("customer-address.canonical.json", sampleRoot), "utf8");
+    const defaultImport = await request(app).post("/api/models/import").send({ sourceFormat: "canonical", content }).expect(201);
+    expect(defaultImport.body.model.model.name).toBe(JSON.parse(content).name);
+    for (const name of ["  ", "x".repeat(121), 123]) {
+      await request(app).post("/api/models/import").send({ sourceFormat: "canonical", content, name }).expect(400);
+    }
+    const longName = "x".repeat(120);
+    const longImport = await request(app).post("/api/models/import").send({ sourceFormat: "canonical", content, name: longName }).expect(201);
+    await request(app).post("/api/generation-profiles").send({ modelVersionId: longImport.body.model.id }).expect(201);
+    await request(app).post(`/api/models/${defaultImport.body.model.modelId}/versions`)
+      .send({ model: { ...defaultImport.body.model.model, name: "Renamed model" } }).expect(201);
+    const list = await request(app).get("/api/models").expect(200);
+    expect(list.body.models.find((model: { id: string }) => model.id === defaultImport.body.model.modelId).name).toBe("Renamed model");
+  });
+
   it("imports Smart MDM fields as separate entities without inventing relationships", async () => {
     const schema = {
       format: "smart-mdm/schema", formatVersion: 1, domain: "party", domainLabel: "Party Master",
@@ -92,6 +121,10 @@ describe("model-driven synthetic data API", () => {
     expect(wrongFormat.body.error.code).toBe("WRONG_MODEL_FORMAT");
     const imported = await request(app).post("/api/models/import").send({ sourceFormat: "smart-mdm", content }).expect(201);
     const model = imported.body.model.model;
+    expect(model.name).toBe("Party Master");
+    const renamed = await request(app).post("/api/models/import")
+      .send({ sourceFormat: "smart-mdm", content, name: "Banking party" }).expect(201);
+    expect(renamed.body.model.model.name).toBe("Banking party");
     expect(imported.body.model.sourceFormat).toBe("smart-mdm");
     expect(model.entities.map((entity: { name: string }) => entity.name)).toEqual(["party", "identifiers"]);
     expect(model.entities[0].fields.find((field: { name: string }) => field.name === "status").enum).toEqual(["active", "retired"]);
@@ -110,6 +143,180 @@ describe("model-driven synthetic data API", () => {
     const unknownRule = structuredClone(schema);
     Object.assign(unknownRule.schema.fields[1], { qualityRules: { min: 5 } });
     await request(app).post("/api/models/import").send({ sourceFormat: "smart-mdm", content: JSON.stringify(unknownRule) }).expect(400);
+  });
+
+  it("imports extended canonical models for review and requires acknowledgment before generating", async () => {
+    const source = {
+      name: "Banking model", modelFormat: "TestAgent canonical entities/fields JSON",
+      description: "Extended model", businessRules: [{ description: "Example" }],
+      entities: [
+        { name: "Party", description: "Parent", scope: "core", uniqueConstraints: [["externalId"]], fields: [
+          { name: "id", type: "string", required: true, primaryKey: true, generationRule: { type: "uuid" } },
+          { name: "externalId", type: "string", required: true, generationRule: { type: "approvedFixtureOnly" } },
+        ] },
+        { name: "Child", subtypeOf: "Party", uniqueConstraints: [["id", "partyId"]], fields: [
+          { name: "id", type: "string", required: true, primaryKey: true },
+          { name: "partyId", type: "string", required: true, foreignKey: { entity: "Party", field: "id" } },
+        ] },
+      ],
+    };
+    const content = JSON.stringify(source);
+    const wrong = await request(app).post("/api/models/import").send({ sourceFormat: "json-schema", content }).expect(400);
+    expect(wrong.body.error.code).toBe("WRONG_MODEL_FORMAT");
+    const imported = await request(app).post("/api/models/import").send({ sourceFormat: "extended-canonical", content }).expect(201);
+    const version = imported.body.model;
+    expect(version.model.entities[0].fields[1].unique).toBe(true);
+    expect(version.model.entities[1].fields[1].foreignKey).toEqual({ entity: "Party", field: "id" });
+    expect(version.model.entities[1].fields[1].unique).toBe(false);
+    const blocked = await request(app).post("/api/generation-profiles").send({ modelVersionId: version.id }).expect(409);
+    expect(blocked.body.error.code).toBe("PARTIAL_MODEL_REVIEW_REQUIRED");
+    await request(app).post(`/api/models/${version.modelId}/versions`).send({ model: version.model }).expect(409);
+    const reviewed = await request(app).post(`/api/models/${version.modelId}/versions`)
+      .send({ model: version.model, acknowledgePartialModel: true }).expect(201);
+    await request(app).post("/api/generation-profiles").send({ modelVersionId: reviewed.body.model.id }).expect(201);
+    await request(app).post("/api/generation-profiles").send({ modelVersionId: version.id }).expect(409);
+    const unsupported = structuredClone(source);
+    Object.assign(unsupported.entities[0].fields[0], { undocumentedConstraint: true });
+    await request(app).post("/api/models/import").send({ sourceFormat: "extended-canonical", content: JSON.stringify(unsupported) }).expect(400);
+  });
+
+  it("generates date-formatted strings and explicitly repairs legacy profile rules", async () => {
+    const source = {
+      name: "Dates", entities: [{ name: "Person", fields: [
+        { name: "dateOfDeath", type: "string", format: "date", required: false },
+        { name: "createdAt", type: "string", format: "date-time", required: true },
+        { name: "dateOfBirth", type: "string", format: "date", required: true },
+        { name: "note", type: "string", required: true },
+      ] }],
+    };
+    const imported = await request(app).post("/api/models/import")
+      .send({ sourceFormat: "canonical", content: JSON.stringify(source) }).expect(201);
+    const profileResponse = await request(app).post("/api/generation-profiles")
+      .send({ modelVersionId: imported.body.model.id }).expect(201);
+    const profile = profileResponse.body.profile as GenerationProfile;
+    expect(profile.rules["Person.dateOfDeath"].kind).toBe("date");
+    expect(profile.rules["Person.createdAt"].kind).toBe("datetime");
+    expect(profile.rules["Person.dateOfBirth"]).toMatchObject({ kind: "date", ageMin: 18, ageMax: 90 });
+    const oldModel = structuredClone(imported.body.model.model);
+    oldModel.entities[0].fields[0].suggestion.rule = { kind: "string", minLength: 6, maxLength: 16 };
+    database.prepare("UPDATE model_versions SET model_json = ? WHERE id = ?").run(JSON.stringify(oldModel), imported.body.model.id);
+    const legacyModelProfile = await request(app).post("/api/generation-profiles")
+      .send({ modelVersionId: imported.body.model.id }).expect(201);
+    expect(legacyModelProfile.body.profile.rules["Person.dateOfDeath"].kind).toBe("date");
+    const rules = {
+      ...profile.rules,
+      "Person.dateOfDeath": { kind: "string", minLength: 6, maxLength: 16, nullProbability: 0.25 },
+      "Person.createdAt": { kind: "string", minLength: 6, maxLength: 16 },
+      "Person.dateOfBirth": { kind: "date", ageMin: 20, ageMax: 25 },
+    };
+    await request(app).patch(`/api/generation-profiles/${profile.id}`).send({ rules }).expect(200);
+    const failure = await request(app).post("/api/datasets/preview").send({ profileId: profile.id }).expect(422);
+    expect(failure.body.error.message).toContain("dateOfDeath:format");
+    const repaired = await request(app).post(`/api/generation-profiles/${profile.id}/repair-date-rules`).send({}).expect(200);
+    expect(repaired.body.updatedFields).toEqual(["Person.dateOfDeath", "Person.createdAt"]);
+    expect(repaired.body.profile.rules["Person.dateOfDeath"]).toEqual({ kind: "date", nullProbability: 0.25 });
+    expect(repaired.body.profile.rules["Person.dateOfBirth"]).toEqual({ kind: "date", ageMin: 20, ageMax: 25 });
+    expect(repaired.body.profile.rules["Person.note"]).toEqual(profile.rules["Person.note"]);
+    const preview = await request(app).post("/api/datasets/preview").send({ profileId: profile.id }).expect(200);
+    const row = preview.body.records.find((record: { payload: { dateOfDeath?: unknown } }) => record.payload.dateOfDeath !== null);
+    expect(row.payload.dateOfDeath).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(row.payload.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    const again = await request(app).post(`/api/generation-profiles/${profile.id}/repair-date-rules`).send({}).expect(200);
+    expect(again.body.updatedFields).toEqual([]);
+  });
+
+  it("allocates unique foreign keys without reusing parents and explains impossible counts", async () => {
+    const source = {
+      name: "One-to-one",
+      entities: [
+        { name: "Party", fields: [{ name: "id", type: "string", required: true, primaryKey: true }] },
+        { name: "Person", fields: [{ name: "partyId", type: "string", required: true, primaryKey: true, foreignKey: { entity: "Party", field: "id" } }] },
+      ],
+    };
+    const imported = await request(app).post("/api/models/import")
+      .send({ sourceFormat: "canonical", content: JSON.stringify(source) }).expect(201);
+    const created = await request(app).post("/api/generation-profiles")
+      .send({ modelVersionId: imported.body.model.id }).expect(201);
+    const profile = created.body.profile as GenerationProfile;
+    expect(profile.recordCounts).toEqual({ Party: 20, Person: 20 });
+    const dataset = await request(app).post("/api/datasets").send({ profileId: profile.id, name: "One-to-one" }).expect(201);
+    const records = (await request(app).get(`/api/datasets/${dataset.body.dataset.id}/records?pageSize=100`).expect(200))
+      .body.records as Array<{ entity: string; payload: { id?: string; partyId?: string } }>;
+    const parents = new Set(records.filter((record) => record.entity === "Party").map((record) => record.payload.id));
+    const children = records.filter((record) => record.entity === "Person").map((record) => record.payload.partyId);
+    expect(new Set(children).size).toBe(20);
+    expect(children.every((id) => parents.has(id))).toBe(true);
+
+    await request(app).patch(`/api/generation-profiles/${profile.id}`).send({ recordCounts: { Party: 20, Person: 7 } }).expect(200);
+    await request(app).post("/api/datasets/preview").send({ profileId: profile.id }).expect(200);
+    await request(app).patch(`/api/generation-profiles/${profile.id}`).send({ recordCounts: { Party: 20, Person: 0 } }).expect(200);
+    await request(app).post("/api/datasets/preview").send({ profileId: profile.id }).expect(200);
+    await request(app).patch(`/api/generation-profiles/${profile.id}`).send({ recordCounts: { Party: 20, Person: 30 } }).expect(200);
+    const invalid = await request(app).post("/api/datasets/preview").send({ profileId: profile.id }).expect(400);
+    expect(invalid.body.error.code).toBe("INVALID_RELATIONSHIP_COUNTS");
+    expect(invalid.body.error.message).toContain("Person.partyId");
+    expect(invalid.body.error.message).toContain("30 Person");
+    expect(invalid.body.error.message).toContain("20 Party");
+  });
+
+  it("honors explicit cardinality and uniqueness configured in foreign-key rules", async () => {
+    const source = {
+      name: "Configured relationship",
+      entities: [
+        { name: "Parent", fields: [{ name: "id", type: "string", required: true, primaryKey: true }] },
+        { name: "Child", fields: [
+          { name: "id", type: "string", required: true, primaryKey: true },
+          { name: "parentId", type: "string", required: true, foreignKey: { entity: "Parent", field: "id" }, cardinality: { min: 1, max: 2 } },
+        ] },
+      ],
+    };
+    const imported = await request(app).post("/api/models/import").send({ sourceFormat: "canonical", content: JSON.stringify(source) }).expect(201);
+    const created = await request(app).post("/api/generation-profiles").send({ modelVersionId: imported.body.model.id }).expect(201);
+    const profile = created.body.profile as GenerationProfile;
+    await request(app).patch(`/api/generation-profiles/${profile.id}`).send({
+      recordCounts: { Parent: 20, Child: 20 },
+      rules: { ...profile.rules, "Child.parentId": { kind: "foreignKey", unique: true } },
+    }).expect(200);
+    await request(app).post("/api/datasets/preview").send({ profileId: profile.id }).expect(200);
+    await request(app).patch(`/api/generation-profiles/${profile.id}`).send({ recordCounts: { Parent: 20, Child: 0 } }).expect(200);
+    const invalid = await request(app).post("/api/datasets/preview").send({ profileId: profile.id }).expect(400);
+    expect(invalid.body.error.message).toContain("Child.parentId");
+    expect(invalid.body.error.message).toContain("0 Child");
+  });
+
+  it("uses the model pattern for saved string rules without overriding an explicit rule pattern", async () => {
+    const source = {
+      name: "Patterned fields",
+      entities: [{ name: "Person", fields: [
+        { name: "birthCountry", type: "string", required: true, pattern: "^[A-Z]{2}$" },
+      ] }],
+    };
+    const imported = await request(app).post("/api/models/import")
+      .send({ sourceFormat: "canonical", content: JSON.stringify(source) }).expect(201);
+    const created = await request(app).post("/api/generation-profiles")
+      .send({ modelVersionId: imported.body.model.id }).expect(201);
+    const profile = created.body.profile as GenerationProfile;
+    expect(profile.rules["Person.birthCountry"].kind).toBe("string");
+    const first = await request(app).post("/api/datasets/preview").send({ profileId: profile.id }).expect(200);
+    const second = await request(app).post("/api/datasets/preview").send({ profileId: profile.id }).expect(200);
+    const values = (body: { records: Array<{ payload: { birthCountry: string } }> }) =>
+      body.records.map((record) => record.payload.birthCountry);
+    expect(values(first.body)).toEqual(values(second.body));
+    expect(values(first.body).every((value) => /^[A-Z]{2}$/.test(value))).toBe(true);
+
+    await request(app).patch(`/api/generation-profiles/${profile.id}`).send({
+      rules: { "Person.birthCountry": { kind: "string", pattern: "^[0-9]{2}$" } },
+    }).expect(200);
+    const invalid = await request(app).post("/api/datasets/preview").send({ profileId: profile.id }).expect(422);
+    expect(invalid.body.error.message).toContain("birthCountry:pattern");
+
+    const unsafe = structuredClone(source);
+    unsafe.entities[0].fields[0].pattern = "^(?=A)A$";
+    const unsafeModel = await request(app).post("/api/models/import")
+      .send({ sourceFormat: "canonical", content: JSON.stringify(unsafe) }).expect(201);
+    const rejected = await request(app).post("/api/generation-profiles")
+      .send({ modelVersionId: unsafeModel.body.model.id }).expect(400);
+    expect(rejected.body.error.code).toBe("UNSAFE_REGEX");
   });
 
   it("generates reproducible, referentially valid data and deliberate negative records with JSON/CSV exports", async () => {

@@ -43,12 +43,18 @@ export function defaultRecordCounts(model: CanonicalModel): Record<string, numbe
       .filter((field) => field.foreignKey)
       .map((field) => {
         const parentCount = counts[field.foreignKey!.entity] ?? 10;
-        const cardinality = field.cardinality ?? { min: 1, max: 2 };
-        const average = cardinality.max === undefined ? cardinality.min + 1 : (cardinality.min + cardinality.max) / 2;
-        return Math.max(0, Math.round(parentCount * average));
+        const cardinality = relationshipCardinality(field, field.primaryKey || field.unique);
+        const average = !field.cardinality && (field.primaryKey || field.unique)
+          ? 1
+          : cardinality.max === undefined ? cardinality.min + 1 : (cardinality.min + cardinality.max) / 2;
+        return {
+          desired: Math.max(0, Math.round(parentCount * average)),
+          minimum: parentCount * cardinality.min,
+          maximum: cardinality.max === undefined ? Infinity : parentCount * cardinality.max,
+        };
       });
     counts[entity.name] = parents.length > 0
-      ? Math.max(...parents)
+      ? Math.min(Math.min(...parents.map((parent) => parent.maximum)), Math.max(...parents.map((parent) => Math.max(parent.desired, parent.minimum))))
       : 20;
   }
   return counts;
@@ -60,6 +66,7 @@ export function defaultProfileRules(model: CanonicalModel): Record<string, Gener
   for (const entity of model.entities) {
     for (const field of entity.fields) {
       let rule = structuredClone(field.suggestion.rule);
+      const dateKind = formattedDateRule(field);
       if (field.foreignKey) {
         rule = { kind: "foreignKey" };
       } else if (normalizedFieldName(field.name) === "countrycode") {
@@ -78,12 +85,19 @@ export function defaultProfileRules(model: CanonicalModel): Record<string, Gener
           values: field.enum,
           ...(field.unique ? { unique: true } : {}),
         };
+      } else if (rule.kind === "string" && dateKind) {
+        rule = { kind: dateKind };
       }
       if (field.nullable) rule.nullProbability = 0;
       rules[`${entity.name}.${field.name}`] = rule;
     }
   }
   return rules;
+}
+
+export function formattedDateRule(field: ModelField): "date" | "datetime" | undefined {
+  if (field.type !== "string" || field.foreignKey || field.enum?.length) return undefined;
+  return field.format === "date" ? "date" : field.format === "date-time" ? "datetime" : undefined;
 }
 
 export function createDefaultProfile(
@@ -95,7 +109,7 @@ export function createDefaultProfile(
   return {
     id,
     modelVersionId,
-    name: `${model.name} demo profile`,
+    name: `${model.name.slice(0, 67)} demo profile`,
     locale: "nl",
     seed: "testagent-demo-2026",
     referenceDate: "2026-01-01",
@@ -192,7 +206,8 @@ export function generateDataset(
       if (parentRecords.length === 0 && count > 0) {
         throw new HttpError(400, "EMPTY_FOREIGN_KEY_PARENT", `${entity.name}.${field.name} references ${reference.entity}, which has no generated records.`);
       }
-      const allocation = allocateParentRecords(count, parentRecords, field, random);
+      const rule = profile.rules[`${entity.name}.${field.name}`] ?? field.suggestion.rule;
+      const allocation = allocateParentRecords(count, parentRecords, field, entity.name, field.primaryKey || field.unique || rule.unique === true, random);
       assignments.set(field.name, allocation);
     }
 
@@ -374,7 +389,8 @@ function validateRule(
   if (rule.minLength !== undefined && rule.maxLength !== undefined && rule.minLength > rule.maxLength) {
     throw new HttpError(400, "INVALID_RULE_LENGTH", `${entity.name}.${field.name} minimum string length exceeds its maximum.`);
   }
-  if (rule.pattern) validatePattern(rule.pattern, `${entity.name}.${field.name}`);
+  if (field.pattern) validatePattern(field.pattern, `${entity.name}.${field.name} model pattern`);
+  if (rule.pattern) validatePattern(rule.pattern, `${entity.name}.${field.name} rule pattern`);
   if (field.foreignKey && rule.kind !== "foreignKey") {
     throw new HttpError(400, "INVALID_FOREIGN_KEY_RULE", `${entity.name}.${field.name} must use the foreignKey rule.`);
   }
@@ -405,24 +421,31 @@ function validateRule(
   }
 }
 
+function relationshipCardinality(field: ModelField, unique: boolean): { min: number; max?: number } {
+  const cardinality = field.cardinality ?? (unique ? { min: 0, max: 1 } : { min: 1, max: 2 });
+  return unique ? { min: cardinality.min, max: Math.min(cardinality.max ?? 1, 1) } : cardinality;
+}
+
 function allocateParentRecords(
   childCount: number,
   parentRecords: ParentAssignment[],
   field: ModelField,
+  entityName: string,
+  unique: boolean,
   random: () => number,
 ): ParentAssignment[] {
-  if (childCount === 0) return [];
-  if (parentRecords.length === 0) return [];
-  const cardinality = field.cardinality ?? { min: 1, max: 2 };
+  if (childCount === 0 && !field.cardinality) return [];
+  const cardinality = relationshipCardinality(field, unique);
   const minimumTotal = parentRecords.length * cardinality.min;
   const maximumTotal = cardinality.max === undefined ? Number.POSITIVE_INFINITY : parentRecords.length * cardinality.max;
-  if (childCount < minimumTotal || childCount > maximumTotal) {
+  if ((cardinality.max !== undefined && cardinality.min > cardinality.max) || childCount < minimumTotal || childCount > maximumTotal) {
     throw new HttpError(
       400,
       "INVALID_RELATIONSHIP_COUNTS",
-      `${field.name} count ${childCount} cannot satisfy ${cardinality.min}–${cardinality.max ?? "many"} child records per each of ${parentRecords.length} parent records.`,
+      `${entityName}.${field.name} ${unique ? "is unique and " : ""}requires ${cardinality.min}–${cardinality.max ?? "many"} child records per parent; ${childCount} ${entityName} records cannot be assigned to ${parentRecords.length} ${field.foreignKey?.entity ?? "parent"} records. Adjust the entity counts or relationship constraints.`,
     );
   }
+  if (childCount === 0 || parentRecords.length === 0) return [];
   const perParent = parentRecords.map(() => cardinality.min);
   let remaining = childCount - minimumTotal;
   let attempts = 0;
@@ -520,7 +543,8 @@ function generateValue(
       const minLength = rule.minLength ?? field.length?.min ?? 6;
       const maxLength = rule.maxLength ?? field.length?.max ?? 16;
       const length = randomInteger(minLength, maxLength, random);
-      if (rule.pattern) return faker.helpers.fromRegExp(new RegExp(rule.pattern));
+      const pattern = rule.pattern ?? field.pattern;
+      if (pattern) return faker.helpers.fromRegExp(new RegExp(pattern));
       return faker.string.alphanumeric({ length });
     }
     case "integer": {

@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { migrateResultStatus } from "./result-status-migration.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const defaultDatabasePath = resolve(projectRoot, "storage/agentx.sqlite");
@@ -350,5 +351,10 @@ function migrate(database: Database.Database): void {
       database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(6, new Date().toISOString());
     });
     applySprintMigration();
+    currentVersion = { version: 6 };
+  }
+
+  if ((currentVersion.version ?? 0) < 7) {
+    migrateResultStatus(database);
   }
 }

@@ -16,7 +16,7 @@ import type {
 } from "@agentx/shared";
 import type { NextFunction, Request, Response } from "express";
 import { Router } from "express";
-import { createDefaultProfile, validateProfile } from "./generator.js";
+import { createDefaultProfile, formattedDateRule, validateProfile } from "./generator.js";
 import { HttpError } from "./http-error.js";
 import { importModel, normalizeCanonicalModel } from "./model-import.js";
 import { DatasetService } from "./dataset-service.js";
@@ -80,7 +80,9 @@ export function createModelsApiRouter(
     if (body.content.length > 100_000) {
       throw new HttpError(413, "MODEL_TOO_LARGE", "Model documents must be 100 KB or smaller.");
     }
+    const name = body.name === undefined ? undefined : stringValue(body.name, "Model name", 120);
     const model = importModel(sourceFormat, body.content);
+    if (name !== undefined) model.name = name;
     const modelId = randomUUID();
     const versionId = randomUUID();
     const now = new Date().toISOString();
@@ -156,7 +158,12 @@ export function createModelsApiRouter(
     if (!existing) throw new HttpError(404, "MODEL_NOT_FOUND", `Model ${modelId} was not found.`);
     const submitted = body.model;
     const model = normalizeCanonicalModel(submitted);
-    const current = database.prepare("SELECT latest_version FROM data_models WHERE id = ?").get(modelId) as { latest_version: number };
+    const current = database.prepare(`SELECT m.latest_version, v.source_format FROM data_models m
+      JOIN model_versions v ON v.model_id = m.id AND v.version = m.latest_version WHERE m.id = ?`)
+      .get(modelId) as { latest_version: number; source_format: ModelSourceFormat };
+    if (current.source_format === "extended-canonical" && body.acknowledgePartialModel !== true) {
+      throw new HttpError(409, "PARTIAL_MODEL_REVIEW_REQUIRED", "Review the omitted rules and explicitly acknowledge them before saving a canonical version.");
+    }
     const version = current.latest_version + 1;
     const versionId = randomUUID();
     const now = new Date().toISOString();
@@ -168,8 +175,8 @@ export function createModelsApiRouter(
         INSERT INTO model_versions (id, model_id, version, source_format, source_text, model_json, created_at)
         VALUES (?, ?, ?, 'canonical', ?, ?, ?)
       `).run(versionId, modelId, version, sourceText, JSON.stringify(model), now);
-      database.prepare("UPDATE data_models SET latest_version = ?, updated_at = ? WHERE id = ?")
-        .run(version, now, modelId);
+      database.prepare("UPDATE data_models SET name = ?, latest_version = ?, updated_at = ? WHERE id = ?")
+        .run(model.name, version, now, modelId);
     });
     transaction();
     response.status(201).json({
@@ -241,6 +248,34 @@ export function createModelsApiRouter(
       WHERE id = ?
     `).run(profileInput.modelVersionId, profileInput.name, JSON.stringify(profileInput), now, profileId);
     response.json({ profile: { ...profileInput, id: profileId, createdAt: previous.createdAt, updatedAt: now } satisfies GenerationProfile });
+  }));
+
+  router.post("/generation-profiles/:id/repair-date-rules", route((request, response) => {
+    const profile = getProfile(database, routeParameter(request, "id"));
+    const model = modelForVersion(database, profile.modelVersionId);
+    const rules = { ...profile.rules };
+    const updatedFields: string[] = [];
+    for (const entity of model.entities) {
+      for (const field of entity.fields) {
+        const path = `${entity.name}.${field.name}`;
+        const current = rules[path];
+        const kind = formattedDateRule(field);
+        if (!kind || current?.kind !== "string") continue;
+        rules[path] = {
+          kind,
+          ...(current.nullProbability !== undefined ? { nullProbability: current.nullProbability } : {}),
+          ...(current.unique !== undefined ? { unique: current.unique } : {}),
+        };
+        updatedFields.push(path);
+      }
+    }
+    const { id, createdAt, updatedAt: _updatedAt, ...settings } = profile;
+    const updated = { ...settings, rules };
+    validateProfile(updated, model);
+    const now = new Date().toISOString();
+    database.prepare("UPDATE generation_profiles SET settings_json = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(updated), now, id);
+    response.json({ profile: { ...updated, id, createdAt, updatedAt: now } satisfies GenerationProfile, updatedFields });
   }));
 
   router.post("/datasets/preview", route((request, response) => {
@@ -497,14 +532,17 @@ function profileFromRow(row: ProfileRow): GenerationProfile {
 }
 
 function modelForVersion(database: Database.Database, modelVersionId: string): CanonicalModel {
-  const row = database.prepare("SELECT model_json FROM model_versions WHERE id = ?").get(modelVersionId) as { model_json: string } | undefined;
+  const row = database.prepare("SELECT model_json, source_format FROM model_versions WHERE id = ?").get(modelVersionId) as { model_json: string; source_format: ModelSourceFormat } | undefined;
   if (!row) throw new HttpError(404, "MODEL_VERSION_NOT_FOUND", `Model version ${modelVersionId} was not found.`);
+  if (row.source_format === "extended-canonical") {
+    throw new HttpError(409, "PARTIAL_MODEL_REVIEW_REQUIRED", "Review the omitted rules and save an acknowledged canonical version before creating a generation profile.");
+  }
   return JSON.parse(row.model_json) as CanonicalModel;
 }
 
 function parseSourceFormat(value: unknown): ModelSourceFormat {
-  if (value !== "canonical" && value !== "json-schema" && value !== "mermaid" && value !== "smart-mdm") {
-    throw new HttpError(400, "INVALID_MODEL_FORMAT", "sourceFormat must be canonical, json-schema, mermaid, or smart-mdm.");
+  if (value !== "canonical" && value !== "json-schema" && value !== "mermaid" && value !== "smart-mdm" && value !== "extended-canonical") {
+    throw new HttpError(400, "INVALID_MODEL_FORMAT", "sourceFormat must be canonical, json-schema, mermaid, smart-mdm, or extended-canonical.");
   }
   return value;
 }

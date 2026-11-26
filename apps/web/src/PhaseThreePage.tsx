@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import customerAddressDemoSuite from "../../../samples/customer-address-demo-suite.json?raw";
 import type {
   ConnectionInput,
   DatasetListResponse,
@@ -54,6 +55,27 @@ function isActiveRun(run: TestRun | null): boolean {
 
 function verdictClass(status: string): string {
   return `verdict-tag verdict-${status.toLowerCase()}`;
+}
+
+function DemoSuiteUpload() {
+  const [fileName, setFileName] = useState("");
+  const [simulated, setSimulated] = useState(false);
+  const validExtension = /\.xlsx$/i.test(fileName);
+  const templateUrl = new URL("./assets/agentx-test-suite-example.xlsx", import.meta.url).href;
+
+  return (
+    <section className="panel">
+      <div className="panel-header"><div><h2>Excel test suite upload</h2><p>Demo only · Download a populated example, edit it, and simulate an upload.</p></div></div>
+      <div className="phase-form">
+        <div className="phase-actions"><a className="button button-secondary" href={templateUrl} download="agentx-test-suite-example.xlsx">Download example template</a></div>
+        <label>Choose Excel workbook (.xlsx)<input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => { setFileName(event.target.files?.[0]?.name ?? ""); setSimulated(false); }} /></label>
+        {fileName && !validExtension && <p className="phase-help" role="alert">Choose a file with an .xlsx extension. Its contents are not checked.</p>}
+        <button type="button" className="button button-primary" disabled={!validExtension} onClick={() => setSimulated(true)}>Simulate upload</button>
+        {simulated && <div className="phase-three-callout" role="status">Simulated upload: {fileName}. No file was sent or validated, and no suite was created or run.</div>}
+        <p className="phase-help">This is a mock-up, not an Excel import. Use the Suite JSON editor below to create a runnable suite.</p>
+      </div>
+    </section>
+  );
 }
 
 export default function PhaseThreePage({ initialTab = "configuration" }: { initialTab?: Tab }) {
@@ -445,6 +467,7 @@ export default function PhaseThreePage({ initialTab = "configuration" }: { initi
           </div>
 
           <div className="phase-stack">
+            <DemoSuiteUpload />
             <section className="panel">
               <div className="panel-header"><div><h2>Versioned test suites</h2><p>Suite edits create immutable versions captured in each run snapshot.</p></div><span className="live-tag"><i /> {suites.length} SUITE{ suites.length === 1 ? "" : "S"}</span></div>
               {suites.length > 0 && <div className="phase-dataset-toolbar"><label>Selected suite<select value={selectedSuiteId} onChange={(event) => void selectSuite(event.target.value)}><option value="">Choose suite…</option>{suites.map((suite) => <option key={suite.id} value={suite.id}>{suite.name} · v{suite.latestVersion} · {suite.caseCount} cases</option>)}</select></label></div>}
@@ -453,8 +476,14 @@ export default function PhaseThreePage({ initialTab = "configuration" }: { initi
                 <div className="phase-actions">
                   <button className="button button-primary" disabled={busy || !suiteDocument.trim()} onClick={() => void saveSuite()}>{selectedSuiteId ? "Save new version" : "Create suite"}</button>
                   <button className="button button-secondary" disabled={busy} onClick={() => { setSelectedSuiteId(""); setSuiteDocument(""); }}>New suite</button>
+                  <button className="button button-secondary" disabled={busy} onClick={() => {
+                    if (suiteDocument.trim() && !window.confirm("Replace the current suite JSON with the customer and address example?")) return;
+                    setSelectedSuiteId("");
+                    setSuiteDocument(customerAddressDemoSuite);
+                  }}>Load customer &amp; address example</button>
                 </div>
                 <p className="phase-help">Cases use JSON templates such as <code>{"{{record.customerId}}"}</code>, expected status codes, response assertions, extraction, and dependencies.</p>
+                <p className="phase-help">The customer and address example uses valid Customer and Address records from the sample model. Each address case creates its own demo customer before adding the generated address.</p>
               </div>
             </section>
           </div>

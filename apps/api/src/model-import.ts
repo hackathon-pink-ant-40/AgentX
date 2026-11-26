@@ -36,6 +36,16 @@ export class DeterministicRuleSuggestionProvider implements RuleSuggestionProvid
     if (field.enum?.length) {
       return suggestion({ kind: "enum", values: field.enum }, 0.98, "The field has an explicit list of allowed values.");
     }
+    if (field.type === "string" && (field.format === "date" || field.format === "date-time")) {
+      if (field.format === "date" && (name.includes("dateofbirth") || name === "dob" || name === "birthdate")) {
+        return suggestion({ kind: "date", ageMin: 18, ageMax: 90 }, 0.94, "A fixed reference date and age range make birth dates reproducible.");
+      }
+      return suggestion(
+        { kind: field.format === "date" ? "date" : "datetime" },
+        0.95,
+        "The declared date format requires a date-compatible generation rule.",
+      );
+    }
     if (name === "firstname" || name === "givenname") {
       return suggestion({ kind: "firstName" }, 0.96, "The field name indicates a localized given name.");
     }
@@ -129,8 +139,14 @@ export function importModel(
   if (sourceFormat === "smart-mdm") {
     return normalizeCanonicalModel(smartMdmToCanonical(parsed), provider);
   }
+  if (sourceFormat === "extended-canonical") {
+    return normalizeCanonicalModel(extendedCanonicalToCanonical(parsed), provider);
+  }
   if (isObject(parsed) && parsed.format === "smart-mdm/schema") {
     throw new HttpError(400, "WRONG_MODEL_FORMAT", "This is a Smart MDM export. Select the smart-mdm import format.");
+  }
+  if (sourceFormat === "json-schema" && isObject(parsed) && Array.isArray(parsed.entities)) {
+    throw new HttpError(400, "WRONG_MODEL_FORMAT", "This document contains entities and fields, not JSON Schema. Select the canonical or extended-canonical import format.");
   }
   if (sourceFormat === "json-schema") {
     return normalizeCanonicalModel(jsonSchemaToCanonical(parsed), provider);
@@ -248,6 +264,52 @@ export function topologicalEntities(model: CanonicalModel): ModelEntity[] {
 
   for (const entity of model.entities) visit(entity);
   return sorted;
+}
+
+function extendedCanonicalToCanonical(input: unknown): unknown {
+  if (!isObject(input) || input.modelFormat !== "TestAgent canonical entities/fields JSON" || !Array.isArray(input.entities)) {
+    throw new HttpError(400, "INVALID_EXTENDED_MODEL", "Expected an extended canonical entities/fields model with the supported modelFormat.");
+  }
+  assertKnownKeys(input, new Set([
+    "name", "modelId", "version", "description", "modelFormat", "referenceDate", "entities",
+    "relationships", "businessRules", "countryProfiles", "identifierProfiles", "generationProfile",
+    "testScenarios", "governance", "sources",
+  ]), "extended canonical model");
+  const fieldKeys = [
+    "name", "type", "format", "required", "nullable", "length", "minLength", "maxLength",
+    "minimum", "maximum", "min", "max", "pattern", "enum", "primaryKey", "unique",
+    "foreignKey", "foreignKeyCandidates", "mappingRequired", "cardinality",
+  ];
+  const entities = input.entities.map((entity) => {
+    if (!isObject(entity) || !Array.isArray(entity.fields)) {
+      throw new HttpError(400, "INVALID_EXTENDED_MODEL", "Each extended canonical entity must contain a fields array.");
+    }
+    assertKnownKeys(entity, new Set(["name", "description", "scope", "fields", "uniqueConstraints", "subtypeOf"]), "extended canonical entity");
+    const rawConstraints = entity.uniqueConstraints ?? [];
+    if (!Array.isArray(rawConstraints)) {
+      throw new HttpError(400, "INVALID_EXTENDED_MODEL", "Entity uniqueConstraints must be arrays of field names.");
+    }
+    const constraints: string[][] = rawConstraints.map((constraint: unknown) => {
+      if (!Array.isArray(constraint) || constraint.length === 0 || !constraint.every(isString)) {
+        throw new HttpError(400, "INVALID_EXTENDED_MODEL", "Entity uniqueConstraints must be arrays of field names.");
+      }
+      return constraint.filter(isString);
+    });
+    const singleUnique = new Set(constraints.filter((constraint) => constraint.length === 1).map((constraint) => constraint[0]));
+    const fields = entity.fields.map((field) => {
+      if (!isObject(field)) throw new HttpError(400, "INVALID_EXTENDED_MODEL", "Extended canonical fields must be objects.");
+      assertKnownKeys(field, new Set([...fieldKeys, "generationRule", "referenceData", "sensitivity"]), "extended canonical field");
+      const result = Object.fromEntries(fieldKeys.filter((key) => key in field).map((key) => [key, field[key]]));
+      if (typeof field.name === "string" && singleUnique.has(field.name)) result.unique = true;
+      return result;
+    });
+    const fieldNames = new Set(fields.map((field) => field.name));
+    if (constraints.some((constraint) => constraint.some((field) => !fieldNames.has(field)))) {
+      throw new HttpError(400, "INVALID_EXTENDED_MODEL", "A unique constraint references an unknown field.");
+    }
+    return { name: entity.name, fields };
+  });
+  return { name: input.name, entities };
 }
 
 function smartMdmToCanonical(input: unknown): unknown {

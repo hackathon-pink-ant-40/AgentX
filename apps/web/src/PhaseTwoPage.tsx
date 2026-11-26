@@ -17,8 +17,9 @@ import type {
 
 type Props = { initialTab?: "models" | "data" };
 
-const sourceFormats: ModelSourceFormat[] = ["canonical", "json-schema", "mermaid", "smart-mdm"];
+const sourceFormats: ModelSourceFormat[] = ["canonical", "json-schema", "mermaid", "smart-mdm", "extended-canonical"];
 const smartMdmNotice = "Smart MDM fields are imported as separate entities. Relationships, match keys, collection limits, privacy labels, roles, and quality weights are not enforced. Dropdowns without options are unrestricted strings.";
+const extendedModelNotice = "Partial import: business rules, composite uniqueness, subtypes, relationship metadata beyond field FKs, reference data, generation rules (including approved-fixture requirements), and privacy metadata are not enforced. UUID and date-time formats are not validated. Review the original document and configure safe rules before generating data.";
 const scenarioOptions: Array<{ id: NegativeScenarioKind; label: string }> = [
   { id: "missing_required", label: "Missing required value" },
   { id: "null_required", label: "Null required value" },
@@ -63,6 +64,7 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
   const [modelContent, setModelContent] = useState("");
   const [sourceFormat, setSourceFormat] = useState<ModelSourceFormat>("canonical");
   const [importContent, setImportContent] = useState("");
+  const [importName, setImportName] = useState("");
   const [samples, setSamples] = useState<Array<{ name: string; format: ModelSourceFormat; content: string }>>([]);
   const [profiles, setProfiles] = useState<GenerationProfile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState("");
@@ -172,21 +174,25 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
       const result = await apiRequest<{ model: ModelVersion }>("/api/models/import", jsonBody({
         sourceFormat,
         content: importContent,
+        ...(importName.trim() ? { name: importName.trim() } : {}),
       }));
       setSelectedModel(result.model);
       setModelContent(JSON.stringify(result.model.model, null, 2));
       setImportContent("");
+      setImportName("");
       await loadWorkspace();
     }, "Model imported and stored as version 1.");
   }
 
   async function saveModelVersion(): Promise<void> {
     if (!selectedModel) return;
+    const acknowledgePartialModel = selectedModel.sourceFormat === "extended-canonical";
+    if (acknowledgePartialModel && !window.confirm(`${extendedModelNotice}\n\nSave this partial model as a canonical version?`)) return;
     await perform(async () => {
       const model = JSON.parse(modelContent) as CanonicalModel;
       const result = await apiRequest<{ model: ModelVersion }>(
         `/api/models/${encodeURIComponent(selectedModel.modelId)}/versions`,
-        jsonBody({ model }),
+        jsonBody({ model, ...(acknowledgePartialModel ? { acknowledgePartialModel: true } : {}) }),
       );
       setSelectedModel(result.model);
       setModelContent(JSON.stringify(result.model.model, null, 2));
@@ -241,6 +247,28 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
     }, "Generation profile saved.");
   }
 
+  async function repairDateRules(): Promise<void> {
+    if (!activeProfileId || profileDirty) return;
+    if (!window.confirm("Replace string generation rules on date-formatted fields with date rules? String-specific settings, including patterns and lengths, will be removed. Other fields are unchanged. Review date ranges afterward.")) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await apiRequest<{ profile: GenerationProfile; updatedFields: string[] }>(
+        `/api/generation-profiles/${encodeURIComponent(activeProfileId)}/repair-date-rules`,
+        jsonBody({}),
+      );
+      await loadWorkspace();
+      setActiveProfileId(result.profile.id);
+      setPreview(null);
+      setNotice(`Updated ${result.updatedFields.length} date-format rule(s). Review their ranges before generating.`);
+    } catch (actionError) {
+      setError(messageOf(actionError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function runPreview(): Promise<void> {
     if (!activeProfileId) return;
     await perform(async () => {
@@ -273,10 +301,17 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
 
   function setImportDocument(content: string): void {
     setImportContent(content);
+    if (/^\s*erDiagram(?:\s|$)/.test(content)) {
+      setSourceFormat("mermaid");
+      return;
+    }
     try {
       const parsed: unknown = JSON.parse(content);
-      if (typeof parsed === "object" && parsed !== null && "format" in parsed && parsed.format === "smart-mdm/schema") {
-        setSourceFormat("smart-mdm");
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        if ("format" in parsed && parsed.format === "smart-mdm/schema") setSourceFormat("smart-mdm");
+        else if ("modelFormat" in parsed && parsed.modelFormat === "TestAgent canonical entities/fields JSON") setSourceFormat("extended-canonical");
+        else if ("entities" in parsed && Array.isArray(parsed.entities)) setSourceFormat("canonical");
+        else if ("type" in parsed && parsed.type === "object") setSourceFormat("json-schema");
       }
     } catch {
       // Incomplete JSON and Mermaid text are validated when imported.
@@ -325,15 +360,17 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
         <div className="phase-columns">
           <div className="phase-stack">
             <section className="panel">
-              <div className="panel-header"><div><h2>Import a data model</h2><p>Canonical JSON, supported JSON Schema, Mermaid ER, or Smart MDM export.</p></div><span className="method-tag method-post">POST</span></div>
+              <div className="panel-header"><div><h2>Import a data model</h2><p>Canonical JSON, supported JSON Schema, Mermaid ER, Smart MDM, or extended canonical export.</p></div><span className="method-tag method-post">POST</span></div>
               <form className="phase-form" onSubmit={(event) => void importModel(event)}>
                 <div className="phase-inline">
                   <label>Format<select value={sourceFormat} onChange={(event) => setSourceFormat(event.target.value as ModelSourceFormat)}>{sourceFormats.map((format) => <option key={format} value={format}>{format}</option>)}</select></label>
                   <label>Load sample<select defaultValue="" onChange={(event) => void loadSample(event.target.value)}><option value="">Choose sample…</option>{samples.map((sample) => <option key={sample.name} value={sample.name}>{sample.name}</option>)}</select></label>
                 </div>
                 <label>Upload model file<input type="file" accept=".json,.mmd,.mermaid,.txt,application/json,text/plain" onChange={(event) => void loadFile(event.currentTarget.files?.[0])} /></label>
+                <label>Model name (optional)<input type="text" maxLength={120} value={importName} onChange={(event) => setImportName(event.target.value)} placeholder="Use the document's name" /></label>
                 <label>Model document<textarea value={importContent} onChange={(event) => setImportDocument(event.target.value)} required rows={11} placeholder="Paste a model document or load a sample" /></label>
                 {sourceFormat === "smart-mdm" && <p>{smartMdmNotice}</p>}
+                {sourceFormat === "extended-canonical" && <p>{extendedModelNotice}</p>}
                 <button className="button button-primary" disabled={busy || !importContent.trim()}>Import model <span>→</span></button>
               </form>
             </section>
@@ -356,6 +393,7 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
               {selectedModel ? (
                 <div className="phase-form">
                   {selectedModel.sourceFormat === "smart-mdm" && <p>{smartMdmNotice}</p>}
+                  {selectedModel.sourceFormat === "extended-canonical" && <p>{extendedModelNotice} Save an acknowledged canonical version before creating a profile.</p>}
                   <div className="phase-entity-summary">{selectedModel.model.entities.map((entity) => (
                     <span key={entity.name}><strong>{entity.name}</strong>{entity.fields.length} fields · {entity.fields.filter((field) => field.primaryKey).length} PK</span>
                   ))}</div>
@@ -375,7 +413,7 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
                     <p>Saving a model version validates the selected relationships and prevents unresolved mappings from generating data.</p>
                   </div>}
                   <label className="phase-label">Canonical model JSON<textarea value={modelContent} onChange={(event) => setModelContent(event.target.value)} rows={16} spellCheck={false} /></label>
-                  <div className="phase-actions"><button className="button button-secondary" disabled={busy} onClick={() => void saveModelVersion()}>Save as new version</button><button className="button button-primary" disabled={busy} onClick={() => void createProfile()}>Create profile <span>→</span></button></div>
+                  <div className="phase-actions"><button className="button button-secondary" disabled={busy} onClick={() => void saveModelVersion()}>Save as new version</button><button className="button button-primary" disabled={busy || selectedModel.sourceFormat === "extended-canonical"} onClick={() => void createProfile()}>Create profile <span>→</span></button></div>
                 </div>
               ) : <div className="phase-empty">Model structure, inferred attributes, and relationship mappings appear here.</div>}
             </section>
@@ -411,7 +449,7 @@ export default function PhaseTwoPage({ initialTab = "models" }: Props) {
                     }} />{scenario.label}</label>
                   ))}</div></div>
                   {profileDirty && <p role="status">Save profile changes before previewing or generating data.</p>}
-                  <div className="phase-actions"><button className="button button-secondary" disabled={busy} onClick={() => void saveProfile()}>Save profile</button><button className="button button-primary" disabled={busy || profileDirty} onClick={() => void runPreview()}>Preview data <span>→</span></button></div>
+                  <div className="phase-actions"><button className="button button-secondary" disabled={busy} onClick={() => void saveProfile()}>Save profile</button><button className="button button-secondary" disabled={busy || profileDirty} onClick={() => void repairDateRules()}>Fix date-format rules</button><button className="button button-primary" disabled={busy || profileDirty} onClick={() => void runPreview()}>Preview data <span>→</span></button></div>
                 </>
               )}
             </div>

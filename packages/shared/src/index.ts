@@ -89,7 +89,7 @@ export interface AddressListResponse {
 }
 
 export type ModelFieldType = "string" | "integer" | "number" | "boolean" | "date" | "datetime";
-export type ModelSourceFormat = "canonical" | "json-schema" | "mermaid" | "smart-mdm";
+export type ModelSourceFormat = "canonical" | "json-schema" | "mermaid" | "smart-mdm" | "extended-canonical";
 export type LocaleCode = "en" | "nl" | "de";
 export type PrimitiveValue = string | number | boolean | null;
 export type GenerationRuleKind =

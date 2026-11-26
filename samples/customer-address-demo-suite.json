@@ -1,0 +1,116 @@
+{
+  "name": "Demo - Create customer and add address",
+  "cases": [
+    {
+      "id": "createCustomer",
+      "name": "Create and read generated customer",
+      "operation": "INSERT",
+      "entity": "Customer",
+      "recordSelector": { "entity": "Customer", "expectedValid": true },
+      "priority": "P0",
+      "critical": true,
+      "expectedOutcome": "positive",
+      "dependsOn": [],
+      "pbi": "PBI-DEMO-CUSTOMER-ADDRESS",
+      "steps": [
+        {
+          "id": "create",
+          "name": "Create customer from synthetic data",
+          "method": "POST",
+          "path": "customers",
+          "body": {
+            "customerId": "{{run.namespace}}-{{record.customerId}}",
+            "firstName": "{{record.firstName}}",
+            "lastName": "{{record.lastName}}",
+            "email": "{{record.email}}"
+          },
+          "expectedStatuses": [201],
+          "assertions": [
+            { "path": "customer.firstName", "operator": "compareToInput", "expected": "firstName" },
+            { "path": "customer.lastName", "operator": "compareToInput", "expected": "lastName" },
+            { "path": "customer.email", "operator": "compareToInput", "expected": "email" }
+          ],
+          "extract": { "customerId": "customer.customerId" }
+        },
+        {
+          "id": "read",
+          "name": "Read created customer",
+          "method": "GET",
+          "path": "customers/{{steps.create.customerId}}",
+          "expectedStatuses": [200],
+          "assertions": [
+            { "path": "customer.customerId", "operator": "equals", "expected": "{{steps.create.customerId}}" },
+            { "path": "customer.firstName", "operator": "compareToInput", "expected": "firstName" },
+            { "path": "customer.lastName", "operator": "compareToInput", "expected": "lastName" },
+            { "path": "customer.email", "operator": "compareToInput", "expected": "email" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "addAddress",
+      "name": "Create customer and add generated address",
+      "operation": "INSERT",
+      "entity": "Address",
+      "recordSelector": { "entity": "Address", "expectedValid": true },
+      "priority": "P0",
+      "critical": true,
+      "expectedOutcome": "positive",
+      "dependsOn": [],
+      "pbi": "PBI-DEMO-CUSTOMER-ADDRESS",
+      "steps": [
+        {
+          "id": "createOwner",
+          "name": "Create address owner",
+          "method": "POST",
+          "path": "customers",
+          "body": {
+            "customerId": "{{run.namespace}}-owner-{{record.addressId}}",
+            "firstName": "Demo",
+            "lastName": "Address Owner"
+          },
+          "expectedStatuses": [201],
+          "assertions": [
+            { "path": "customer.customerId", "operator": "exists" }
+          ],
+          "extract": { "customerId": "customer.customerId" }
+        },
+        {
+          "id": "createAddress",
+          "name": "Add synthetic address to customer",
+          "method": "POST",
+          "path": "addresses",
+          "body": {
+            "customerId": "{{steps.createOwner.customerId}}",
+            "street": "{{record.street}}",
+            "postalCode": "{{record.postalCode}}",
+            "country": "{{record.countryCode}}"
+          },
+          "expectedStatuses": [201],
+          "assertions": [
+            { "path": "address.customerId", "operator": "equals", "expected": "{{steps.createOwner.customerId}}" },
+            { "path": "address.street", "operator": "compareToInput", "expected": "street" },
+            { "path": "address.postalCode", "operator": "compareToInput", "expected": "postalCode" },
+            { "path": "address.country", "operator": "compareToInput", "expected": "countryCode" }
+          ],
+          "extract": { "addressId": "address.addressId" }
+        },
+        {
+          "id": "readAddresses",
+          "name": "Verify customer's persisted address",
+          "method": "GET",
+          "path": "customers/{{steps.createOwner.customerId}}/addresses",
+          "expectedStatuses": [200],
+          "assertions": [
+            { "path": "addresses", "operator": "count", "expected": 1 },
+            { "path": "addresses[0].addressId", "operator": "equals", "expected": "{{steps.createAddress.addressId}}" },
+            { "path": "addresses[0].customerId", "operator": "equals", "expected": "{{steps.createOwner.customerId}}" },
+            { "path": "addresses[0].street", "operator": "compareToInput", "expected": "street" },
+            { "path": "addresses[0].postalCode", "operator": "compareToInput", "expected": "postalCode" },
+            { "path": "addresses[0].country", "operator": "compareToInput", "expected": "countryCode" }
+          ]
+        }
+      ]
+    }
+  ]
+}
